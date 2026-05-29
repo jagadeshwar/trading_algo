@@ -36,9 +36,9 @@ data/.paper_trader.pid
 data/.latest_notification.json
 data/.topup_history.json
 
-# Trained models — versioned via MLflow, not git
-models/*.pkl
-models/*.joblib
+# Trained models — versioned via MLflow, not git (except HMM which is small)
+models/xgb_*.pkl
+models/xgb_*.joblib
 models/*.cbm
 
 # Logs
