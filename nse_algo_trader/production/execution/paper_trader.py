@@ -109,6 +109,7 @@ class PaperTrader:
         self.use_db = use_db
 
         self._positions: dict[str, Position] = {}  # symbol → open position
+        self._current_prices: dict[str, float] = {}  # live prices for MTM
         self._fills: list[Fill] = []
         self._peak_capital = capital
         self._daily_start_capital = capital
@@ -205,6 +206,7 @@ class PaperTrader:
     ) -> list[Fill]:
         """Check each open position for stop/target/reversal. Returns any exit fills."""
         self.circuit.record_tick()
+        self._current_prices.update(current_prices)   # keep MTM fresh
         exits: list[Fill] = []
 
         for symbol, pos in list(self._positions.items()):
@@ -224,13 +226,13 @@ class PaperTrader:
 
     @property
     def equity(self) -> float:
-        """Cash + mark-to-market value of open positions."""
-        mtm = sum(
-            pos.direction * (price - pos.entry_price) * pos.qty
-            for pos in self._positions.values()
-            for price in [pos.entry_price]  # use entry until price update
-        )
-        return self.cash + mtm
+        """Cash + collateral locked in positions + unrealized P&L at current prices."""
+        position_equity = 0.0
+        for sym, pos in self._positions.items():
+            current = self._current_prices.get(sym, pos.entry_price)
+            # Collateral returned + unrealized P&L
+            position_equity += pos.value + pos.direction * (current - pos.entry_price) * pos.qty
+        return self.cash + position_equity
 
     @property
     def total_pnl(self) -> float:

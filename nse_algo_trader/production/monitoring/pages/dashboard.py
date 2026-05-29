@@ -101,7 +101,7 @@ def _fetch_atm_options(symbol: str, ref_price: float) -> dict:
         chain = DataFetcher(get_fyers_client()).fetch_options_chain(symbol, strike_count=5)
         if not chain.empty:
             result["expiry"] = chain["expiry"].iloc[0]
-            atm_rows = chain[chain["strike"] == atm]
+            atm_rows = chain[chain["strike"] == int(atm)]   # ensure int match
             ce = atm_rows[atm_rows["option_type"] == "CE"]
             pe = atm_rows[atm_rows["option_type"] == "PE"]
             if not ce.empty:
@@ -113,8 +113,10 @@ def _fetch_atm_options(symbol: str, ref_price: float) -> dict:
     except Exception:
         result = cached or result
 
-    st.session_state[cache_key] = result
-    st.session_state[time_key]  = now
+    # Only cache if we got real data — never cache empty results
+    if result.get("ce_ltp") or result.get("pe_ltp"):
+        st.session_state[cache_key] = result
+        st.session_state[time_key]  = now
     return result
 
 
@@ -509,9 +511,8 @@ def render():
     tj_hdr, tj_btn = st.columns([4, 1])
     tj_hdr.subheader("Trade Journal")
     if tj_btn.button("🔄 Refresh", use_container_width=True):
-        # Clear session-state price cache to force immediate re-fetch
         for k in list(st.session_state.keys()):
-            if k.startswith("lp_"):
+            if k.startswith("lp_") or k.startswith("opts_"):
                 del st.session_state[k]
         st.rerun()
 
