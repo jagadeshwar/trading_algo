@@ -372,12 +372,45 @@ def render():
     positions = state.get("positions", [])
     st.subheader(f"Open Positions ({len(positions)})")
     if positions:
-        pos_df = pd.DataFrame(positions)
-        pos_df["direction"] = pos_df["direction"].map({"LONG": "🟢 LONG", "SHORT": "🔴 SHORT"})
-        pos_df["entry"] = pos_df["entry"].apply(lambda x: f"₹{x:,.2f}")
-        pos_df["mtm"]   = pos_df["mtm"].apply(lambda x: f"₹{x:+,.0f}")
-        pos_df.columns  = ["Symbol", "Direction", "Entry Price", "Qty", "MTM P&L"]
+        # Fetch live prices for open positions
+        live_prices = {}
+        try:
+            import sys
+            sys.path.insert(0, str(PROJECT))
+            from dotenv import load_dotenv
+            load_dotenv()
+            from auth import get_fyers_client
+            fyers = get_fyers_client()
+            for pos in positions:
+                sym = pos["symbol"]
+                resp = fyers.quotes({"symbols": sym})
+                if resp.get("s") == "ok":
+                    live_prices[sym] = float(resp["d"][0]["v"]["lp"])
+        except Exception:
+            pass
+
+        fetched_at = datetime.now(IST).strftime("%H:%M:%S")
+        rows = []
+        for pos in positions:
+            sym        = pos["symbol"]
+            entry      = float(pos.get("entry", 0))
+            qty        = int(pos.get("qty", 0))
+            dirn       = 1 if pos.get("direction") == "LONG" else -1
+            live_price = live_prices.get(sym, entry)
+            live_mtm   = dirn * (live_price - entry) * qty
+            deployed   = entry * qty
+            rows.append({
+                "Symbol":      sym.replace("NSE:","").replace("-EQ","").replace("-INDEX",""),
+                "Direction":   "🟢 LONG" if dirn == 1 else "🔴 SHORT",
+                "Qty":         qty,
+                "Entry":       f"₹{entry:,.2f}",
+                "Live Price":  f"₹{live_price:,.2f}",
+                "MTM P&L":     f"₹{live_mtm:+,.0f}",
+                "Deployed":    f"₹{deployed:,.0f}",
+            })
+        pos_df = pd.DataFrame(rows)
         st.dataframe(pos_df, use_container_width=True, hide_index=True)
+        st.caption(f"Live prices as of **{fetched_at}** — refreshes on each page load")
     else:
         st.caption("No open positions.")
 
@@ -449,6 +482,88 @@ def render():
                 st.success("Saved — restart session to apply.")
         except Exception as e:
             st.info(f"Could not load strategy config: {e}")
+
+    st.divider()
+
+    # ── Notification Settings ──────────────────────────────────────────────────
+    with st.expander("🔔 Notification Settings"):
+        st.caption("Get instant alerts on your phone (Telegram) and desktop when signals fire.")
+
+        env_path = PROJECT / ".env"
+        current_token = ""
+        current_chat  = ""
+        try:
+            from dotenv import dotenv_values
+            ev = dotenv_values(str(env_path))
+            current_token = ev.get("TELEGRAM_BOT_TOKEN", "")
+            current_chat  = ev.get("TELEGRAM_CHAT_ID",  "")
+        except Exception:
+            pass
+
+        with st.form("notif_form"):
+            st.markdown("**Telegram Setup**")
+            st.caption(
+                "1. Open Telegram → search **@BotFather** → `/newbot` → copy the token\n"
+                "2. Start your bot (send it any message)\n"
+                "3. Go to `https://api.telegram.org/bot<TOKEN>/getUpdates` → copy `chat.id`"
+            )
+            nc1, nc2 = st.columns(2)
+            token = nc1.text_input("Bot Token", value=current_token,
+                                   placeholder="123456789:AAF...", type="password")
+            chat  = nc2.text_input("Chat ID",   value=current_chat,
+                                   placeholder="123456789")
+
+            st.markdown("**Alert types:**")
+            ac1, ac2, ac3, ac4 = st.columns(4)
+            notif_entry   = ac1.checkbox("Entry signal",  value=True)
+            notif_exit    = ac2.checkbox("Exit (win/loss)", value=True)
+            notif_circuit = ac3.checkbox("Circuit break",  value=True)
+            notif_daily   = ac4.checkbox("Daily summary",  value=True)
+
+            col_save, col_test = st.columns(2)
+            save_btn = col_save.form_submit_button("💾  Save Notification Settings",
+                                                    type="primary", use_container_width=True)
+            test_btn = col_test.form_submit_button("🔔  Send Test Notification",
+                                                    use_container_width=True)
+
+        if save_btn and (token or chat):
+            try:
+                lines = env_path.read_text().splitlines() if env_path.exists() else []
+                def _set(lines, key, val):
+                    for i, l in enumerate(lines):
+                        if l.startswith(f"{key}="):
+                            lines[i] = f"{key}={val}"
+                            return lines
+                    lines.append(f"{key}={val}")
+                    return lines
+                if token: lines = _set(lines, "TELEGRAM_BOT_TOKEN", token)
+                if chat:  lines = _set(lines, "TELEGRAM_CHAT_ID",   chat)
+                env_path.write_text("\n".join(lines) + "\n")
+                st.success("✅  Telegram credentials saved to .env")
+            except Exception as e:
+                st.error(f"Could not save: {e}")
+
+        if test_btn:
+            import os
+            if token: os.environ["TELEGRAM_BOT_TOKEN"] = token
+            if chat:  os.environ["TELEGRAM_CHAT_ID"]   = chat
+            from production.monitoring.notifications import NotificationManager
+            nm = NotificationManager()
+            results = nm.test()
+            for ch, ok in results.items():
+                st.write(f"{'✅' if ok else '❌'}  {ch.capitalize()}: {'sent' if ok else 'failed (check credentials)'}")
+
+        # Desktop notification toggle
+        st.markdown("**Desktop (macOS):**")
+        st.caption("Enabled by default — shows as macOS notification banners with sound.")
+        if st.button("🔔  Test Desktop Notification"):
+            from production.monitoring.notifications import NotificationManager
+            nm = NotificationManager()
+            ok = nm._send_desktop(type('N', (), {
+                'emoji': '🔔', 'title': 'Test — NSE Algo Trader',
+                'body': 'Desktop notifications are working!', 'time': ''
+            })())
+            st.success("Desktop notification sent ✓") if ok else st.warning("Desktop notifications not available on this OS.")
 
     # ── Auto-refresh ──────────────────────────────────────────────────────────
     if running:
