@@ -78,6 +78,46 @@ def _fetch_live_prices(symbols: tuple) -> dict:
     return prices
 
 
+def _fetch_atm_options(symbol: str, ref_price: float) -> dict:
+    """Fetch ATM CE and PE for the nearest weekly expiry. Session-state cached 30s."""
+    import time as _t
+    step      = 100 if "NIFTYBANK" in symbol else 50
+    atm       = round(ref_price / step) * step
+    cache_key = f"opts_{symbol}_{atm}"
+    time_key  = f"opts_t_{symbol}_{atm}"
+    now       = _t.time()
+
+    cached    = st.session_state.get(cache_key, {})
+    if cached and (now - st.session_state.get(time_key, 0)) < 30:
+        return cached
+
+    result = {"atm_strike": atm, "ce_ltp": None, "pe_ltp": None,
+              "ce_sym": "—", "pe_sym": "—", "expiry": "—"}
+    try:
+        import sys; sys.path.insert(0, str(PROJECT))
+        from dotenv import load_dotenv; load_dotenv(PROJECT / ".env")
+        from auth import get_fyers_client
+        from production.data.fetcher import DataFetcher
+        chain = DataFetcher(get_fyers_client()).fetch_options_chain(symbol, strike_count=5)
+        if not chain.empty:
+            result["expiry"] = chain["expiry"].iloc[0]
+            atm_rows = chain[chain["strike"] == atm]
+            ce = atm_rows[atm_rows["option_type"] == "CE"]
+            pe = atm_rows[atm_rows["option_type"] == "PE"]
+            if not ce.empty:
+                result["ce_ltp"] = float(ce["ltp"].iloc[0])
+                result["ce_sym"] = ce["symbol"].iloc[0]
+            if not pe.empty:
+                result["pe_ltp"] = float(pe["ltp"].iloc[0])
+                result["pe_sym"] = pe["symbol"].iloc[0]
+    except Exception:
+        result = cached or result
+
+    st.session_state[cache_key] = result
+    st.session_state[time_key]  = now
+    return result
+
+
 def _live_equity(state: dict) -> tuple[float, float, str]:
     """Return (live_equity, unrealized_pnl, fetched_at) using live prices."""
     positions = state.get("positions", [])
@@ -403,20 +443,29 @@ def render():
         if trades.empty:
             st.info("No paper trades logged yet.")
         else:
-            display = trades.head(20).copy()
+            display = trades.copy()
+            # Build set of symbols that have a matching EXIT
+            exited = set(display.loc[display.get("type","") == "EXIT", "symbol"]) \
+                     if "type" in display.columns else set()
             display["created_at"] = pd.to_datetime(display["created_at"]).dt.strftime("%d %b %H:%M")
             display["side"] = display["side"].map({"BUY": "🟢 BUY", "SELL": "🔴 SELL"})
             display["fill_price"] = display["fill_price"].apply(
                 lambda x: f"₹{x:,.2f}" if pd.notna(x) else "—")
-            display["status"] = display.get("type", pd.Series(["ENTRY"]*len(display))).apply(
-                lambda x: "🟢 Open" if str(x) == "ENTRY" else "✅ Closed"
-            )
+            def _status(row):
+                t = str(row.get("type", "ENTRY"))
+                sym = row.get("symbol", "")
+                if t == "EXIT":
+                    pnl = float(row.get("pnl", 0))
+                    return ("✅ Closed · Profit" if pnl > 0 else
+                            "❌ Closed · Loss" if pnl < 0 else "✅ Closed · B/E")
+                return "✅ Closed" if sym in exited else "🟢 Open"
+            display["Status"] = display.apply(_status, axis=1)
             display = display.rename(columns={
                 "created_at": "Time", "symbol": "Symbol",
-                "side": "Side", "qty": "Qty", "fill_price": "Buy/Sell Price", "status": "Status",
+                "side": "Side", "qty": "Qty", "fill_price": "Buy/Sell Price",
             })
             st.dataframe(
-                display[["Time", "Symbol", "Side", "Qty", "Buy/Sell Price", "Status"]],
+                display[["Time", "Symbol", "Side", "Qty", "Buy/Sell Price", "Status"]].head(20),
                 use_container_width=True, hide_index=True,
             )
 
@@ -540,6 +589,60 @@ def render():
                 sc4.metric("Total Costs",   f"₹{total_cost:,.0f}")
         except Exception as e:
             st.warning(f"Could not load trade journal: {e}")
+
+    # ── Options Market Data ───────────────────────────────────────────────────
+    st.divider()
+    st.subheader("Options Market Data")
+    st.caption("Live ATM call & put prices for symbols in the journal. Refreshes with the page.")
+
+    opts_file = PROJECT / "data/trades_log.jsonl"
+    if opts_file.exists():
+        try:
+            rows      = [json.loads(l) for l in opts_file.read_text().splitlines() if l.strip()]
+            syms_seen = {r["symbol"] for r in rows if r.get("symbol")}
+            live_px   = _fetch_live_prices(tuple(syms_seen)) if syms_seen else {}
+
+            opts_rows = []
+            for sym in sorted(syms_seen):
+                cur_price = live_px.get(sym)
+                if not cur_price:
+                    continue
+                opts = _fetch_atm_options(sym, cur_price)
+                short_sym = sym.replace("NSE:","").replace("-INDEX","").replace("-EQ","")
+
+                # Direction of last signal for this symbol
+                sig_file = PROJECT / "data/signals_log.jsonl"
+                last_dir = 0
+                if sig_file.exists():
+                    sigs = [json.loads(l) for l in sig_file.read_text().splitlines() if l.strip()
+                            and json.loads(l).get("symbol") == sym]
+                    if sigs:
+                        last_dir = int(sigs[-1].get("direction", 0))
+
+                suggested = "BUY CE 📈" if last_dir == 1 else ("BUY PE 📉" if last_dir == -1 else "—")
+
+                opts_rows.append({
+                    "Symbol":       short_sym,
+                    "Spot Price":   f"₹{cur_price:,.2f}",
+                    "ATM Strike":   f"₹{opts['atm_strike']:,.0f}",
+                    "Expiry":       opts["expiry"],
+                    "CE (Call) ₹":  f"₹{opts['ce_ltp']:,.2f}" if opts["ce_ltp"] else "—",
+                    "PE (Put) ₹":   f"₹{opts['pe_ltp']:,.2f}" if opts["pe_ltp"] else "—",
+                    "Options Signal": suggested,
+                    "CE Symbol":    opts["ce_sym"],
+                    "PE Symbol":    opts["pe_sym"],
+                })
+
+            if opts_rows:
+                df_opts = pd.DataFrame(opts_rows)
+                st.dataframe(df_opts, use_container_width=True, hide_index=True)
+                st.caption(f"Prices as of **{live_px.get('_at','—')}** IST · ATM = nearest 50-pt strike · CE = Call · PE = Put")
+            else:
+                st.info("Start paper trading to see options data here.")
+        except Exception as e:
+            st.warning(f"Options data unavailable: {e}")
+    else:
+        st.info("No trades yet — options data will appear once paper trading starts.")
 
     # ── Data stats ────────────────────────────────────────────────────────────
     st.divider()

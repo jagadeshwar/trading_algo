@@ -161,23 +161,24 @@ class DataFetcher:
             raise RuntimeError(f"Options chain error for {symbol}: {response.get('message')}")
 
         records = []
-        for item in response.get("optionsChain", []):
+        chain = response.get("data", {}).get("optionsChain", [])
+        expiry_data = response.get("data", {}).get("expiryData", [])
+        next_expiry = expiry_data[0]["date"] if expiry_data else ""
+        for item in chain:
+            if not item.get("option_type"):   # skip underlying row
+                continue
             records.append(
                 {
-                    "strike": item.get("strikePrice"),
-                    "expiry": item.get("expiryDate"),
+                    "strike":      item.get("strike_price"),
+                    "expiry":      next_expiry,
                     "option_type": item.get("option_type"),
-                    "ltp": item.get("ltp"),
-                    "oi": item.get("oi"),
-                    "oi_change": item.get("oiChange"),
-                    "iv": item.get("iv"),
-                    "delta": item.get("delta"),
-                    "gamma": item.get("gamma"),
-                    "theta": item.get("theta"),
-                    "vega": item.get("vega"),
-                    "bid": item.get("bid"),
-                    "ask": item.get("ask"),
-                    "volume": item.get("volume"),
+                    "symbol":      item.get("symbol"),
+                    "ltp":         item.get("ltp"),
+                    "bid":         item.get("bid"),
+                    "ask":         item.get("ask"),
+                    "oi":          item.get("oi"),
+                    "oi_change":   item.get("oich"),
+                    "volume":      item.get("volume"),
                 }
             )
 
