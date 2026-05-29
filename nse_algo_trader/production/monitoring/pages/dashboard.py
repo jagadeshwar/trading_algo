@@ -13,6 +13,72 @@ import streamlit as st
 IST = ZoneInfo("Asia/Kolkata")
 
 
+@st.cache_data(ttl=15)
+def _fetch_live_prices(symbols: tuple) -> dict:
+    """Fetch live LTP for each symbol from Fyers. Cached 15s to avoid API spam."""
+    try:
+        import sys
+        sys.path.insert(0, str(Path(__file__).parents[3]))
+        from dotenv import load_dotenv
+        load_dotenv()
+        from auth import get_fyers_client
+        fyers = get_fyers_client()
+        prices = {}
+        for sym in symbols:
+            resp = fyers.quotes({"symbols": sym})
+            if resp.get("s") == "ok":
+                prices[sym] = float(resp["d"][0]["v"]["lp"])
+        prices["_at"] = datetime.now(IST).strftime("%H:%M:%S")
+        return prices
+    except Exception:
+        return {}
+
+
+def _live_equity(state: dict) -> tuple[float, float, str]:
+    """Return (live_equity, unrealized_pnl, fetched_at) using live prices."""
+    positions = state.get("positions", [])
+    capital   = float(state.get("capital", 0))
+    if not positions:
+        # No open positions — equity = capital + closed P&L from JSONL
+        trades_file = Path("data/trades_log.jsonl")
+        closed_pnl = 0.0
+        if trades_file.exists():
+            try:
+                rows = [json.loads(l) for l in trades_file.read_text().splitlines() if l.strip()]
+                closed_pnl = sum(float(r.get("pnl", 0)) - float(r.get("costs", 0))
+                                 for r in rows if r.get("type") == "EXIT")
+            except Exception:
+                pass
+        return capital + closed_pnl, 0.0, "—"
+
+    symbols = tuple(p["symbol"] for p in positions)
+    live    = _fetch_live_prices(symbols)
+    fetched_at = live.get("_at", "—")
+
+    unrealized = 0.0
+    for pos in positions:
+        sym   = pos["symbol"]
+        price = live.get(sym, pos.get("entry", 0))
+        entry = float(pos.get("entry", 0))
+        qty   = int(pos.get("qty", 0))
+        dirn  = 1 if pos.get("direction") == "LONG" else -1
+        unrealized += dirn * (price - entry) * qty
+
+    # Equity = cash held + unrealized MTM + closed P&L
+    trades_file = Path("data/trades_log.jsonl")
+    closed_pnl = 0.0
+    if trades_file.exists():
+        try:
+            rows = [json.loads(l) for l in trades_file.read_text().splitlines() if l.strip()]
+            closed_pnl = sum(float(r.get("pnl", 0)) - float(r.get("costs", 0))
+                             for r in rows if r.get("type") == "EXIT")
+        except Exception:
+            pass
+
+    live_equity = capital + closed_pnl + unrealized
+    return live_equity, unrealized, fetched_at
+
+
 def _load_trades_from_db() -> pd.DataFrame:
     try:
         from production.db.database import get_engine
@@ -166,7 +232,8 @@ def render():
         if running:
             syms = " · ".join(s.replace("NSE:","").replace("-EQ","").replace("-INDEX","")
                               for s in tc_state.get("symbols", []))
-            st.success(f"🟢 **LIVE** — {syms} · {tc_state.get('interval')}min · updated {tc_state.get('last_update','—')}")
+            now_str = datetime.now(IST).strftime("%H:%M:%S")
+            st.success(f"🟢 **LIVE** — {syms} · {tc_state.get('interval')}min · bar update {tc_state.get('last_update','—')} · prices as of {now_str}")
         else:
             st.warning("🔴 **Paper trading is stopped**")
     with btn_col:
@@ -189,36 +256,37 @@ def render():
         st.rerun()
     st.divider()
 
-    trades = _load_trades_from_db()
+    trades  = _load_trades_from_db()
     signals = _load_signals_from_db()
-    stats = _compute_pnl_from_trades(trades)
+    stats   = _compute_pnl_from_trades(trades)
+
+    # ── Live equity from real-time prices ─────────────────────────────────────
+    live_equity, unrealized_pnl, prices_at = _live_equity(tc_state)
+    starting_capital = float(tc_state.get("capital", live_equity))
+    live_total_pnl   = live_equity - starting_capital
+    live_pnl_pct     = live_total_pnl / starting_capital * 100 if starting_capital else 0
 
     # ── P&L Hero Cards ────────────────────────────────────────────────────────
     st.subheader("Profit & Loss")
     c1, c2, c3, c4, c5 = st.columns(5)
 
-    total_pnl = stats["total_pnl"]
-    daily_pnl = stats["daily_pnl"]
-
     with c1:
-        st.metric(
-            "Total P&L",
-            f"₹{total_pnl:+,.0f}",
-            f"{stats['total_pnl_pct']:+.3f}%",
-            delta_color="normal",
-        )
+        st.metric("Live Equity",   f"₹{live_equity:,.0f}",
+                  f"{live_pnl_pct:+.2f}% vs start", delta_color="normal")
     with c2:
-        st.metric("Today's P&L", f"₹{daily_pnl:+,.0f}")
+        st.metric("Total P&L",     f"₹{live_total_pnl:+,.0f}",
+                  f"Unrealized ₹{unrealized_pnl:+,.0f}" if unrealized_pnl else None,
+                  delta_color="normal")
     with c3:
-        st.metric("Total Trades", stats["total_trades"])
+        st.metric("Total Trades",  stats["total_trades"])
     with c4:
-        st.metric("Win Rate", f"{stats['win_rate']}%",
+        st.metric("Win Rate",      f"{stats['win_rate']}%",
                   "✓ above target" if stats["win_rate"] >= 52 else "✗ below 52%")
     with c5:
         st.metric("Profit Factor", f"{stats['profit_factor']}",
                   "✓ good" if stats["profit_factor"] >= 1.4 else "needs improvement")
 
-    st.caption(f"Transaction costs paid: ₹{stats['total_costs']:,.0f}")
+    st.caption(f"Prices fetched at **{prices_at}** · Costs paid: ₹{stats['total_costs']:,.0f}")
     st.divider()
 
     # ── P&L Explanation ───────────────────────────────────────────────────────
