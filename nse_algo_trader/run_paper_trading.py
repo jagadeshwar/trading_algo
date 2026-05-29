@@ -50,23 +50,28 @@ def _append_signal(signal, acted_on: bool) -> None:
         f.write(json.dumps(row) + "\n")
 
 
-def _append_trade(fill, direction: str, entry_price: float,
-                  stop: float, target: float, confidence: float) -> None:
+def _append_trade(fill, trade_type: str, direction: str = "",
+                  entry_price: float = 0.0, stop: float = 0.0,
+                  target: float = 0.0, confidence: float = 0.0,
+                  capital: float = 0.0, capital_after: float = 0.0) -> None:
     TRADES_FILE.parent.mkdir(parents=True, exist_ok=True)
     row = {
-        "time":        str(fill.time),
-        "symbol":      fill.symbol,
-        "side":        fill.side,
-        "direction":   direction,
-        "qty":         fill.qty,
-        "price":       round(fill.price, 2),
-        "stop":        round(stop, 2),
-        "target":      round(target, 2),
-        "confidence":  round(confidence, 4),
-        "pnl":         round(fill.pnl, 2),
-        "costs":       round(fill.costs, 2),
-        "reason":      fill.reason,
-        "type":        "EXIT" if fill.pnl != 0 else "ENTRY",
+        "time":          str(fill.time),
+        "symbol":        fill.symbol,
+        "type":          trade_type,          # ENTRY | EXIT
+        "side":          fill.side,
+        "direction":     direction,
+        "qty":           fill.qty,
+        "price":         round(fill.price, 2),
+        "entry_price":   round(entry_price, 2),
+        "stop":          round(stop, 2),
+        "target":        round(target, 2),
+        "confidence":    round(confidence, 4),
+        "pnl":           round(fill.pnl, 2),
+        "costs":         round(fill.costs, 2),
+        "reason":        fill.reason,
+        "capital_before": round(capital, 2),
+        "capital_after":  round(capital_after, 2),
     }
     with TRADES_FILE.open("a") as f:
         f.write(json.dumps(row) + "\n")
@@ -275,14 +280,16 @@ def run_paper_session(
                 # ── Generate signal ────────────────────────────────────────────
                 signal = strategy.evaluate_bar(symbol, last_feats, price, vix=vix)
                 if signal and signal.confidence >= 0.6:
+                    capital_before = float(trader.equity)
                     fill = trader.on_signal(signal)
                     acted_on = fill is not None
                     _append_signal(signal, acted_on)
                     if fill:
                         direction_str = "LONG" if signal.direction == 1 else "SHORT"
-                        _append_trade(fill, direction_str,
+                        _append_trade(fill, "ENTRY", direction_str,
                                       signal.entry_price, signal.stop_price,
-                                      signal.target_price, signal.confidence)
+                                      signal.target_price, signal.confidence,
+                                      capital_before, float(trader.equity))
                         notifier.notify_entry(
                             symbol=symbol,
                             direction=direction_str,
@@ -299,7 +306,8 @@ def run_paper_session(
             for exit_fill in exits:
                 capital_val = float(trader.capital)
                 pnl_pct = exit_fill.pnl / capital_val * 100 if capital_val else 0
-                _append_trade(exit_fill, "", 0.0, 0.0, 0.0, 0.0)
+                _append_trade(exit_fill, "EXIT", capital=capital_val,
+                              capital_after=float(trader.equity))
                 notifier.notify_exit(
                     symbol=exit_fill.symbol,
                     price=exit_fill.price,

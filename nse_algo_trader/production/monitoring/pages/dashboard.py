@@ -287,48 +287,91 @@ def render():
 
     st.divider()
 
-    # ── Per-trade P&L breakdown ────────────────────────────────────────────────
-    st.subheader("Per-Trade P&L Breakdown")
-    st.caption("Each row = one completed trade (entry + exit pair). Green = profit, Red = loss.")
+    # ── Trade Journal ─────────────────────────────────────────────────────────
+    st.subheader("Trade Journal")
+    st.caption("Every entry and exit with capital impact. Green = profit, Red = loss.")
 
-    # Build per-trade table from log files (most reliable source)
-    log_dir = Path("logs")
-    paper_logs = sorted(log_dir.glob("paper_trading_*.log"), reverse=True)[:3]
-    trade_rows = []
-    for log_file in paper_logs:
-        for line in log_file.read_text().splitlines():
-            if "PAPER EXIT" in line:
-                parts = line.split("|")
-                if len(parts) >= 3:
-                    trade_rows.append({"raw": parts[-1].strip()})
-
-    if trade_rows:
-        # Parse "PAPER EXIT NSE:HDFCBANK-EQ 10:45 @ 998.0  PnL=+582  reason=TARGET  ✓"
-        parsed = []
-        for t in trade_rows:
-            r = t["raw"]
-            try:
-                parts = r.replace("PAPER EXIT ", "").split()
-                symbol = parts[0]
-                time_  = parts[1]
-                price  = parts[3]
-                pnl_str = [p for p in parts if p.startswith("PnL=")][0].replace("PnL=", "")
-                reason = [p for p in parts if p.startswith("reason=")][0].replace("reason=", "")
-                pnl_val = float(pnl_str.replace(",", "").replace("₹", ""))
-                parsed.append({"Symbol": symbol, "Time": time_, "Exit Price": price,
-                               "P&L (₹)": pnl_val, "Reason": reason,
-                               "Result": "✅ Profit" if pnl_val > 0 else "❌ Loss"})
-            except Exception:
-                pass
-
-        if parsed:
-            df_trades = pd.DataFrame(parsed)
-            df_trades["P&L (₹)"] = df_trades["P&L (₹)"].apply(lambda x: f"₹{x:+,.0f}")
-            st.dataframe(df_trades, use_container_width=True, hide_index=True)
-        else:
-            st.info("Trade details will appear here once paper trading has run.")
+    trades_file = Path("data/trades_log.jsonl")
+    if not trades_file.exists():
+        st.info("No trades yet. Start paper trading — every entry and exit will appear here automatically.")
     else:
-        st.info("No trade logs found yet. Start paper trading to see detailed P&L here.")
+        try:
+            raw_rows = [json.loads(l) for l in trades_file.read_text().splitlines() if l.strip()]
+            if not raw_rows:
+                st.info("No trades yet.")
+            else:
+                journal = []
+                for r in reversed(raw_rows):
+                    trade_type = r.get("type", "")
+                    pnl        = float(r.get("pnl", 0))
+                    symbol     = r.get("symbol", "").replace("NSE:", "").replace("-EQ", "").replace("-INDEX", "")
+                    direction  = r.get("direction", "")
+                    cap_before = float(r.get("capital_before", 0))
+                    cap_after  = float(r.get("capital_after", 0))
+                    cap_change = cap_after - cap_before
+
+                    if trade_type == "ENTRY":
+                        deployed = float(r.get("price", 0)) * int(r.get("qty", 0))
+                        journal.append({
+                            "Time":       pd.to_datetime(r["time"]).strftime("%d %b %H:%M"),
+                            "Type":       "🟢 LONG ENTRY" if direction == "LONG" else "🔴 SHORT ENTRY",
+                            "Symbol":     symbol,
+                            "Qty":        r.get("qty"),
+                            "Price":      f"₹{float(r.get('price',0)):,.2f}",
+                            "Stop":       f"₹{float(r.get('stop',0)):,.2f}",
+                            "Target":     f"₹{float(r.get('target',0)):,.2f}",
+                            "Deployed":   f"₹{deployed:,.0f}",
+                            "P&L":        "—",
+                            "Capital":    f"₹{cap_after:,.0f}" if cap_after else "—",
+                            "Result":     "🔵 Open",
+                        })
+                    elif trade_type == "EXIT":
+                        result = "✅ Profit" if pnl > 0 else ("❌ Loss" if pnl < 0 else "➖ Break-even")
+                        reason = r.get("reason", "").split()[0] if r.get("reason") else "—"
+                        journal.append({
+                            "Time":       pd.to_datetime(r["time"]).strftime("%d %b %H:%M"),
+                            "Type":       "🏁 EXIT",
+                            "Symbol":     symbol,
+                            "Qty":        r.get("qty"),
+                            "Price":      f"₹{float(r.get('price',0)):,.2f}",
+                            "Stop":       "—",
+                            "Target":     "—",
+                            "Deployed":   "—",
+                            "P&L":        f"₹{pnl:+,.0f}",
+                            "Capital":    f"₹{cap_after:,.0f}" if cap_after else "—",
+                            "Result":     f"{result} ({reason})",
+                        })
+
+                df_journal = pd.DataFrame(journal)
+                # Color P&L column
+                def _style_pnl(val):
+                    if val == "—":
+                        return ""
+                    try:
+                        v = float(val.replace("₹","").replace(",","").replace("+",""))
+                        return "color: #00c896" if v > 0 else ("color: #ff4c6a" if v < 0 else "")
+                    except Exception:
+                        return ""
+
+                styled = df_journal.style.applymap(_style_pnl, subset=["P&L"])
+                st.dataframe(styled, use_container_width=True, hide_index=True)
+
+                # Capital summary
+                all_exits = [r for r in raw_rows if r.get("type") == "EXIT"]
+                total_pnl  = sum(float(r.get("pnl", 0)) for r in all_exits)
+                total_cost = sum(float(r.get("costs", 0)) for r in raw_rows)
+                wins  = [r for r in all_exits if float(r.get("pnl", 0)) > 0]
+                losses= [r for r in all_exits if float(r.get("pnl", 0)) < 0]
+
+                st.divider()
+                sc1, sc2, sc3, sc4 = st.columns(4)
+                sc1.metric("Closed Trades",  len(all_exits))
+                sc2.metric("Net P&L",        f"₹{total_pnl:+,.0f}",
+                           "profit" if total_pnl > 0 else ("loss" if total_pnl < 0 else None))
+                sc3.metric("Win / Loss",     f"{len(wins)}W / {len(losses)}L")
+                sc4.metric("Total Costs",    f"₹{total_cost:,.0f}")
+        except Exception as e:
+            st.warning(f"Could not load trade journal: {e}")
 
     # ── Data stats ────────────────────────────────────────────────────────────
     st.divider()
