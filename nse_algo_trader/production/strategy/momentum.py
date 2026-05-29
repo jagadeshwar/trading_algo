@@ -206,6 +206,17 @@ class MomentumStrategy:
         if direction == 0:
             return None
 
+        # ── News sentiment filter (Phase 2) ───────────────────────────────────
+        try:
+            from production.data.news_sentiment import get_sentiment
+            ns = get_sentiment()
+            if ns.should_block(direction, symbol):
+                sent_score = ns.score(symbol)
+                logger.info("Signal BLOCKED by news sentiment: {} score={:.2f}", symbol, sent_score)
+                return None
+        except Exception:
+            pass  # never block on sentiment fetch failure
+
         confidence = 0.50
         if f.get("adx", 0) > 25:  confidence += 0.10
         if f.get("adx", 0) > 35:  confidence += 0.05
