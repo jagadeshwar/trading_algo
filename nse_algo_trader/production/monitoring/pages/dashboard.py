@@ -432,7 +432,7 @@ def render():
             display["acted_on"]   = display.get("acted_on", pd.Series([True]*len(display))).apply(
                 lambda x: "✅ Filled" if x else "⏭ Skipped"
             )
-            display["time"] = pd.to_datetime(display["time"]).dt.strftime("%d %b %H:%M")
+            display["time"] = pd.to_datetime(display["time"], format="ISO8601").dt.strftime("%d %b %H:%M")
             display = display.rename(columns={
                 "time": "Time", "symbol": "Symbol", "direction": "Direction",
                 "confidence": "Confidence", "regime": "Regime", "acted_on": "Result",
@@ -490,7 +490,7 @@ def render():
             display["Call(CE) ₹"]  = display.apply(_rt_ce, axis=1)
             display["Put(PE) ₹"]   = display.apply(_rt_pe, axis=1)
             # Format display columns last
-            display["created_at"]  = pd.to_datetime(display["created_at"]).dt.strftime("%d %b %H:%M")
+            display["created_at"]  = pd.to_datetime(display["created_at"], format="ISO8601").dt.strftime("%d %b %H:%M")
             display["side"]        = display["side"].map({"BUY": "🟢 BUY", "SELL": "🔴 SELL"})
             display["fill_price"]  = display["fill_price"].apply(
                                          lambda x: f"₹{x:,.2f}" if pd.notna(x) else "—")
@@ -577,7 +577,7 @@ def render():
                         live_mtm  = (dirn * (live_price - entry_px) * qty) if live_price else None
                         is_closed = sym_raw in closed_symbols
                         journal.append({
-                            "Time":           pd.to_datetime(r["time"]).strftime("%d %b %H:%M"),
+                            "Time":           pd.to_datetime(r["time"], format="ISO8601").strftime("%d %b %H:%M"),
                             "Type":           "🟢 LONG" if direction == "LONG" else "🔴 SHORT",
                             "Symbol":         symbol,
                             "Qty":            qty,
@@ -600,7 +600,7 @@ def render():
                         reason = r.get("reason", "").split()[0] if r.get("reason") else "—"
                         exit_px = float(r.get("price", 0))
                         journal.append({
-                            "Time":           pd.to_datetime(r["time"]).strftime("%d %b %H:%M"),
+                            "Time":           pd.to_datetime(r["time"], format="ISO8601").strftime("%d %b %H:%M"),
                             "Type":           "🏁 EXIT",
                             "Symbol":         symbol,
                             "Qty":            r.get("qty"),
