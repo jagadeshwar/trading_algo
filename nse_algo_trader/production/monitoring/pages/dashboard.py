@@ -551,16 +551,15 @@ def render():
                     cap_after  = float(r.get("capital_after", 0))
                     live_price = live.get(sym_raw)
 
-                    # Options data for this row's reference price
-                    ref_price = float(r.get("price", live_price or 0))
-                    opts      = opts_cache.get(sym_raw, {})
-                    step      = 100 if "NIFTYBANK" in sym_raw else 50
-                    atm_strike = round(ref_price / step) * step if ref_price else None
-                    expiry    = opts.get("expiry", "—")
-                    ce_ltp    = opts.get("ce_ltp")
-                    pe_ltp    = opts.get("pe_ltp")
+                    # Options always based on LIVE spot price (consistent, actionable)
+                    opts       = opts_cache.get(sym_raw, {})
+                    step       = 100 if "NIFTYBANK" in sym_raw else 50
+                    live_atm   = round(live_price / step) * step if live_price else None
+                    expiry     = opts.get("expiry", "—")
+                    ce_ltp     = opts.get("ce_ltp")
+                    pe_ltp     = opts.get("pe_ltp")
 
-                    # Suggested options action
+                    # Suggested options action based on direction
                     if trade_type == "ENTRY":
                         opt_action = ("📈 BUY CE @ ₹" + f"{ce_ltp:,.2f}" if direction == "LONG" and ce_ltp
                                       else "📉 BUY PE @ ₹" + f"{pe_ltp:,.2f}" if direction == "SHORT" and pe_ltp
@@ -582,8 +581,8 @@ def render():
                             "Symbol":         symbol,
                             "Qty":            qty,
                             "Entry Price":    f"₹{entry_px:,.2f}",
-                            "Current Price":  f"₹{live_price:,.2f}" if live_price else "—",
-                            "ATM Strike":     f"₹{atm_strike:,.0f}" if atm_strike else "—",
+                            "Live Price":     f"₹{live_price:,.2f}" if live_price else "—",
+                            "ATM Strike":     f"₹{live_atm:,.0f}" if live_atm else "—",
                             "Call Price(CE)": f"₹{ce_ltp:,.2f}" if ce_ltp else "—",
                             "Put Price(PE)":  f"₹{pe_ltp:,.2f}" if pe_ltp else "—",
                             "Options Action": opt_action,
@@ -605,8 +604,9 @@ def render():
                             "Symbol":         symbol,
                             "Qty":            r.get("qty"),
                             "Entry Price":    f"₹{float(r.get('entry_price',0)):,.2f}" if r.get('entry_price') else "—",
-                            "Current Price":  f"₹{exit_px:,.2f}",
-                            "ATM Strike":     f"₹{atm_strike:,.0f}" if atm_strike else "—",
+                            "Exit Price":     f"₹{exit_px:,.2f}",
+                            "Live Price":     f"₹{live_price:,.2f}" if live_price else "—",
+                            "ATM Strike":     f"₹{live_atm:,.0f}" if live_atm else "—",
                             "Call Price(CE)": f"₹{ce_ltp:,.2f}" if ce_ltp else "—",
                             "Put Price(PE)":  f"₹{pe_ltp:,.2f}" if pe_ltp else "—",
                             "Options Action": opt_action,
