@@ -213,15 +213,34 @@ class MomentumStrategy:
         if f.get("vol_ratio", 0) > 2.0: confidence += 0.05
         if vix is not None and vix < 15:  confidence += 0.05
         if abs(f.get("dist_ema_21", 0)) > 0.003: confidence += 0.05
-        confidence = min(1.0, confidence)
+
+        # ── XGBoost confidence boost (Phase 2) ────────────────────────────────
+        xgb_model_path = Path("models/xgb_direction.pkl")
+        if xgb_model_path.exists():
+            try:
+                from production.models.xgb_classifier import DirectionClassifier
+                if not hasattr(self, "_xgb_clf") or self._xgb_clf is None:
+                    self._xgb_clf = DirectionClassifier().load(xgb_model_path)
+                xgb_pred = self._xgb_clf.predict_bar(f)
+                if xgb_pred["direction"] == direction:
+                    confidence += xgb_pred["confidence"] * 0.15  # boost if aligned
+                elif xgb_pred["direction"] == -direction:
+                    confidence -= 0.10                            # penalise if opposed
+            except Exception:
+                pass
+
+        confidence = min(1.0, max(0.0, confidence))
 
         stop_dist   = atr * self.cfg.stop_atr_multiplier
         target_dist = atr * self.cfg.target_atr_multiplier
         stop   = close - direction * stop_dist
         target = close + direction * target_dist
 
-        regime_map = {0: "RANGING", 1: "TRENDING_UP", 2: "TRENDING_DOWN", 3: "HIGH_VOL"}
-        regime = regime_map.get(int(f.get("regime_heuristic", 0)), "UNKNOWN")
+        regime_hmm_map = {0: "RANGING", 1: "TRENDING", 2: "HIGH_VOL"}
+        regime_heur_map = {0: "RANGING", 1: "TRENDING_UP", 2: "TRENDING_DOWN", 3: "HIGH_VOL"}
+        hmm_regime  = regime_hmm_map.get(int(f.get("regime_hmm", -1)), "")
+        heur_regime = regime_heur_map.get(int(f.get("regime_heuristic", 0)), "UNKNOWN")
+        regime = hmm_regime if hmm_regime else heur_regime
 
         return Signal(
             time=pd.Timestamp.now(tz="Asia/Kolkata"),
