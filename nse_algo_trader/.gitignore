@@ -28,6 +28,14 @@ data/ohlcv/
 data/features/
 data/options/
 
+# Runtime state and trade logs — regenerated each session
+data/paper_trader_state.json
+data/signals_log.jsonl
+data/trades_log.jsonl
+data/.paper_trader.pid
+data/.latest_notification.json
+data/.topup_history.json
+
 # Trained models — versioned via MLflow, not git
 models/*.pkl
 models/*.joblib
