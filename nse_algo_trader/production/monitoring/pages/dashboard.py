@@ -444,30 +444,62 @@ def render():
             st.info("No paper trades logged yet.")
         else:
             display = trades.copy()
-            # Build set of symbols that have a matching EXIT
-            exited = set(display.loc[display.get("type","") == "EXIT", "symbol"]) \
+            # Closed symbols set
+            exited = set(display.loc[display["type"] == "EXIT", "symbol"]) \
                      if "type" in display.columns else set()
-            display["created_at"] = pd.to_datetime(display["created_at"]).dt.strftime("%d %b %H:%M")
-            display["side"] = display["side"].map({"BUY": "🟢 BUY", "SELL": "🔴 SELL"})
-            display["fill_price"] = display["fill_price"].apply(
-                lambda x: f"₹{x:,.2f}" if pd.notna(x) else "—")
-            def _status(row):
-                t = str(row.get("type", "ENTRY"))
+
+            # Fetch live prices and options for symbols in recent trades
+            rt_syms  = tuple(display["symbol"].unique()) if "symbol" in display.columns else ()
+            rt_live  = _fetch_live_prices(rt_syms) if rt_syms else {}
+            rt_opts: dict[str, dict] = {}
+            for sym in rt_syms:
+                sp = rt_live.get(sym)
+                if sp:
+                    rt_opts[sym] = _fetch_atm_options(sym, sp)
+
+            def _rt_status(row):
+                t   = str(row.get("type", "ENTRY"))
                 sym = row.get("symbol", "")
                 if t == "EXIT":
                     pnl = float(row.get("pnl", 0))
-                    return ("✅ Closed · Profit" if pnl > 0 else
-                            "❌ Closed · Loss" if pnl < 0 else "✅ Closed · B/E")
+                    return "✅ Closed · Profit" if pnl > 0 else \
+                           ("❌ Closed · Loss" if pnl < 0 else "✅ Closed · B/E")
                 return "✅ Closed" if sym in exited else "🟢 Open"
-            display["Status"] = display.apply(_status, axis=1)
+
+            def _rt_atm(row):
+                sym = row.get("symbol", "")
+                ref = float(row.get("fill_price", 0) or 0)
+                step = 100 if "NIFTYBANK" in sym else 50
+                return f"₹{round(ref / step) * step:,.0f}" if ref else "—"
+
+            def _rt_ce(row):
+                o = rt_opts.get(row.get("symbol",""), {})
+                v = o.get("ce_ltp")
+                return f"₹{v:,.2f}" if v else "—"
+
+            def _rt_pe(row):
+                o = rt_opts.get(row.get("symbol",""), {})
+                v = o.get("pe_ltp")
+                return f"₹{v:,.2f}" if v else "—"
+
+            display["created_at"]  = pd.to_datetime(display["created_at"]).dt.strftime("%d %b %H:%M")
+            display["side"]        = display["side"].map({"BUY": "🟢 BUY", "SELL": "🔴 SELL"})
+            display["fill_price"]  = display["fill_price"].apply(
+                                         lambda x: f"₹{x:,.2f}" if pd.notna(x) else "—")
+            display["Status"]      = display.apply(_rt_status, axis=1)
+            display["ATM Strike"]  = display.apply(_rt_atm, axis=1)
+            display["Call(CE) ₹"]  = display.apply(_rt_ce, axis=1)
+            display["Put(PE) ₹"]   = display.apply(_rt_pe, axis=1)
             display = display.rename(columns={
                 "created_at": "Time", "symbol": "Symbol",
                 "side": "Side", "qty": "Qty", "fill_price": "Buy/Sell Price",
             })
             st.dataframe(
-                display[["Time", "Symbol", "Side", "Qty", "Buy/Sell Price", "Status"]].head(20),
+                display[["Time","Symbol","Side","Qty","Buy/Sell Price",
+                          "ATM Strike","Call(CE) ₹","Put(PE) ₹","Status"]].head(20),
                 use_container_width=True, hide_index=True,
             )
+            st.caption("ATM Strike = exercise price · Call(CE)/Put(PE) = option premiums at that strike")
 
     st.divider()
 
@@ -490,16 +522,22 @@ def render():
             if not raw_rows:
                 st.info("No trades yet.")
             else:
-                # Fetch live prices for all unique symbols in the journal
+                # Fetch live prices for all unique symbols
                 unique_syms = tuple({r["symbol"] for r in raw_rows})
-                live = _fetch_live_prices(unique_syms)
-                fetched_at = live.get("_at", "—")
+                live        = _fetch_live_prices(unique_syms)
+                fetched_at  = live.get("_at", "—")
 
-                # Build a set of closed symbols to determine ENTRY status
-                closed_symbols = set()
-                for r in raw_rows:
-                    if r.get("type") == "EXIT":
-                        closed_symbols.add(r.get("symbol", ""))
+                # Pre-fetch ATM options for each symbol (based on live spot)
+                opts_cache: dict[str, dict] = {}
+                for sym in unique_syms:
+                    sp = live.get(sym)
+                    if sp:
+                        opts_cache[sym] = _fetch_atm_options(sym, sp)
+
+                # Build set of closed symbols (symbol has an EXIT row)
+                closed_symbols: set[str] = {
+                    r["symbol"] for r in raw_rows if r.get("type") == "EXIT"
+                }
 
                 journal = []
                 for r in reversed(raw_rows):
@@ -510,50 +548,73 @@ def render():
                     direction  = r.get("direction", "")
                     cap_after  = float(r.get("capital_after", 0))
                     live_price = live.get(sym_raw)
-                    expiry     = _next_expiry(sym_raw)
+
+                    # Options data for this row's reference price
+                    ref_price = float(r.get("price", live_price or 0))
+                    opts      = opts_cache.get(sym_raw, {})
+                    step      = 100 if "NIFTYBANK" in sym_raw else 50
+                    atm_strike = round(ref_price / step) * step if ref_price else None
+                    expiry    = opts.get("expiry", "—")
+                    ce_ltp    = opts.get("ce_ltp")
+                    pe_ltp    = opts.get("pe_ltp")
+
+                    # Suggested options action
+                    if trade_type == "ENTRY":
+                        opt_action = ("📈 BUY CE @ ₹" + f"{ce_ltp:,.2f}" if direction == "LONG" and ce_ltp
+                                      else "📉 BUY PE @ ₹" + f"{pe_ltp:,.2f}" if direction == "SHORT" and pe_ltp
+                                      else "—")
+                    else:
+                        opt_action = ("📉 SELL PE @ ₹" + f"{pe_ltp:,.2f}" if direction == "SHORT" and pe_ltp
+                                      else "📈 SELL CE @ ₹" + f"{ce_ltp:,.2f}" if direction == "LONG" and ce_ltp
+                                      else "—")
 
                     if trade_type == "ENTRY":
                         entry_px  = float(r.get("price", 0))
                         qty       = int(r.get("qty", 0))
-                        deployed  = entry_px * qty
                         dirn      = 1 if direction == "LONG" else -1
                         live_mtm  = (dirn * (live_price - entry_px) * qty) if live_price else None
                         is_closed = sym_raw in closed_symbols
-                        status    = "✅ Closed" if is_closed else "🟢 Open"
                         journal.append({
-                            "Time":          pd.to_datetime(r["time"]).strftime("%d %b %H:%M"),
-                            "Type":          "🟢 LONG" if direction == "LONG" else "🔴 SHORT",
-                            "Symbol":        symbol,
-                            "Qty":           qty,
-                            "Entry Price":   f"₹{entry_px:,.2f}",
-                            "Current Price": f"₹{live_price:,.2f}" if live_price else "—",
-                            "Stop":          f"₹{float(r.get('stop',0)):,.2f}",
-                            "Target":        f"₹{float(r.get('target',0)):,.2f}",
-                            "Expiry":        expiry,
-                            "Deployed":      f"₹{deployed:,.0f}",
-                            "Unrealized":    f"₹{live_mtm:+,.0f}" if live_mtm is not None else "—",
-                            "Realised P&L":  "—",
-                            "Capital After": f"₹{cap_after:,.0f}" if cap_after else "—",
-                            "Status":        status,
+                            "Time":           pd.to_datetime(r["time"]).strftime("%d %b %H:%M"),
+                            "Type":           "🟢 LONG" if direction == "LONG" else "🔴 SHORT",
+                            "Symbol":         symbol,
+                            "Qty":            qty,
+                            "Entry Price":    f"₹{entry_px:,.2f}",
+                            "Current Price":  f"₹{live_price:,.2f}" if live_price else "—",
+                            "ATM Strike":     f"₹{atm_strike:,.0f}" if atm_strike else "—",
+                            "Call Price(CE)": f"₹{ce_ltp:,.2f}" if ce_ltp else "—",
+                            "Put Price(PE)":  f"₹{pe_ltp:,.2f}" if pe_ltp else "—",
+                            "Options Action": opt_action,
+                            "Expiry":         expiry,
+                            "Stop":           f"₹{float(r.get('stop',0)):,.2f}",
+                            "Target":         f"₹{float(r.get('target',0)):,.2f}",
+                            "Unrealized":     f"₹{live_mtm:+,.0f}" if live_mtm is not None else "—",
+                            "Realised P&L":   "—",
+                            "Capital After":  f"₹{cap_after:,.0f}" if cap_after else "—",
+                            "Status":         "✅ Closed" if is_closed else "🟢 Open",
                         })
                     elif trade_type == "EXIT":
                         result = "✅ Profit" if pnl > 0 else ("❌ Loss" if pnl < 0 else "➖ B/E")
                         reason = r.get("reason", "").split()[0] if r.get("reason") else "—"
+                        exit_px = float(r.get("price", 0))
                         journal.append({
-                            "Time":          pd.to_datetime(r["time"]).strftime("%d %b %H:%M"),
-                            "Type":          "🏁 EXIT",
-                            "Symbol":        symbol,
-                            "Qty":           r.get("qty"),
-                            "Entry Price":   f"₹{float(r.get('entry_price',0)):,.2f}" if r.get('entry_price') else "—",
-                            "Current Price": f"₹{live_price:,.2f}" if live_price else "—",
-                            "Stop":          "—",
-                            "Target":        "—",
-                            "Expiry":        expiry,
-                            "Deployed":      "—",
-                            "Unrealized":    "—",
-                            "Realised P&L":  f"₹{pnl:+,.0f}",
-                            "Capital After": f"₹{cap_after:,.0f}" if cap_after else "—",
-                            "Status":        f"✅ Closed · {result} · {reason}",
+                            "Time":           pd.to_datetime(r["time"]).strftime("%d %b %H:%M"),
+                            "Type":           "🏁 EXIT",
+                            "Symbol":         symbol,
+                            "Qty":            r.get("qty"),
+                            "Entry Price":    f"₹{float(r.get('entry_price',0)):,.2f}" if r.get('entry_price') else "—",
+                            "Current Price":  f"₹{exit_px:,.2f}",
+                            "ATM Strike":     f"₹{atm_strike:,.0f}" if atm_strike else "—",
+                            "Call Price(CE)": f"₹{ce_ltp:,.2f}" if ce_ltp else "—",
+                            "Put Price(PE)":  f"₹{pe_ltp:,.2f}" if pe_ltp else "—",
+                            "Options Action": opt_action,
+                            "Expiry":         expiry,
+                            "Stop":           "—",
+                            "Target":         "—",
+                            "Unrealized":     "—",
+                            "Realised P&L":   f"₹{pnl:+,.0f}",
+                            "Capital After":  f"₹{cap_after:,.0f}" if cap_after else "—",
+                            "Status":         f"✅ Closed · {result} · {reason}",
                         })
 
                 df_journal = pd.DataFrame(journal)
@@ -568,10 +629,15 @@ def render():
                     except Exception:
                         return ""
 
-                styled = df_journal.style\
-                    .applymap(_style_cell, subset=["Realised P&L", "Unrealized"])
+                styled = df_journal.style.applymap(
+                    _style_cell, subset=["Realised P&L", "Unrealized"])
                 st.dataframe(styled, use_container_width=True, hide_index=True)
-                st.caption(f"Current prices fetched at **{fetched_at}** IST · click 🔄 Refresh for latest")
+                st.caption(
+                    f"Prices at **{fetched_at}** IST · "
+                    f"ATM Strike = nearest 50-pt exercise price · "
+                    f"Call Price(CE) & Put Price(PE) = option premiums at that strike · "
+                    f"click 🔄 Refresh for latest"
+                )
 
                 # Summary row
                 all_exits  = [r for r in raw_rows if r.get("type") == "EXIT"]
