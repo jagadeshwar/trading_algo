@@ -17,12 +17,59 @@ Options:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 import time
 from datetime import datetime, time as dtime
 from pathlib import Path
 from zoneinfo import ZoneInfo
+
+STATE_FILE   = Path("data/paper_trader_state.json")
+SIGNALS_FILE = Path("data/signals_log.jsonl")
+TRADES_FILE  = Path("data/trades_log.jsonl")
+
+
+def _write_state(state: dict) -> None:
+    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    STATE_FILE.write_text(json.dumps(state, default=str))
+
+
+def _append_signal(signal, acted_on: bool) -> None:
+    SIGNALS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    row = {
+        "time":      str(signal.time),
+        "symbol":    signal.symbol,
+        "direction": signal.direction,
+        "confidence": round(signal.confidence, 4),
+        "regime":    signal.regime,
+        "reason":    signal.reason,
+        "acted_on":  acted_on,
+    }
+    with SIGNALS_FILE.open("a") as f:
+        f.write(json.dumps(row) + "\n")
+
+
+def _append_trade(fill, direction: str, entry_price: float,
+                  stop: float, target: float, confidence: float) -> None:
+    TRADES_FILE.parent.mkdir(parents=True, exist_ok=True)
+    row = {
+        "time":        str(fill.time),
+        "symbol":      fill.symbol,
+        "side":        fill.side,
+        "direction":   direction,
+        "qty":         fill.qty,
+        "price":       round(fill.price, 2),
+        "stop":        round(stop, 2),
+        "target":      round(target, 2),
+        "confidence":  round(confidence, 4),
+        "pnl":         round(fill.pnl, 2),
+        "costs":       round(fill.costs, 2),
+        "reason":      fill.reason,
+        "type":        "EXIT" if fill.pnl != 0 else "ENTRY",
+    }
+    with TRADES_FILE.open("a") as f:
+        f.write(json.dumps(row) + "\n")
 
 from dotenv import load_dotenv
 from loguru import logger
@@ -152,6 +199,12 @@ def run_paper_session(
     strategy = MomentumStrategy(load_config())
     trader   = PaperTrader(capital=capital, use_db=use_db)
     trader.reset_daily()
+    # Seed the circuit breaker so it doesn't trip during pre-market wait
+    trader.circuit.record_tick()
+    trader.circuit.record_heartbeat()
+
+    from production.monitoring.notifications import get_notifier
+    notifier = get_notifier()
 
     poll_seconds = interval_min * 60
     bar_count = 0
@@ -165,6 +218,19 @@ def run_paper_session(
 
             if not is_market_open():
                 next_check = 60
+                # Keep circuit breaker alive during pre-market wait
+                trader.circuit.record_tick()
+                trader.circuit.record_heartbeat()
+                # Update state so dashboard shows RUNNING during wait
+                _write_state({
+                    "running": True, "symbols": symbols, "interval": interval_min,
+                    "capital": capital, "equity": capital, "total_pnl": 0,
+                    "total_pnl_pct": 0, "daily_pnl_pct": 0, "max_dd_pct": 0,
+                    "trades": 0, "win_rate": 0, "profit_factor": 0,
+                    "positions": [], "circuit_broken": False, "circuit_reason": "",
+                    "last_update": now.strftime("%H:%M:%S"),
+                    "signals_today": 0, "market_open": False, "pid": os.getpid(),
+                })
                 if now.time() < MARKET_OPEN:
                     mins = (datetime.combine(now.date(), MARKET_OPEN, tzinfo=IST) - now).seconds // 60
                     logger.info("Market opens in {} min. Waiting...", mins)
@@ -186,6 +252,10 @@ def run_paper_session(
 
             # ── Fetch prices and features for each symbol ─────────────────────
             vix = fetch_vix(fyers) if fyers else None
+            # Successful API contact = heartbeat
+            if fyers:
+                trader.circuit.record_heartbeat()
+                trader.circuit.record_tick()
 
             for symbol in symbols:
                 # Try live price first, fall back to last Parquet bar
@@ -205,19 +275,84 @@ def run_paper_session(
                 # ── Generate signal ────────────────────────────────────────────
                 signal = strategy.evaluate_bar(symbol, last_feats, price, vix=vix)
                 if signal and signal.confidence >= 0.6:
-                    trader.on_signal(signal)
+                    fill = trader.on_signal(signal)
+                    acted_on = fill is not None
+                    _append_signal(signal, acted_on)
+                    if fill:
+                        direction_str = "LONG" if signal.direction == 1 else "SHORT"
+                        _append_trade(fill, direction_str,
+                                      signal.entry_price, signal.stop_price,
+                                      signal.target_price, signal.confidence)
+                        notifier.notify_entry(
+                            symbol=symbol,
+                            direction=direction_str,
+                            price=signal.entry_price,
+                            stop=signal.stop_price,
+                            target=signal.target_price,
+                            qty=fill.qty,
+                            confidence=signal.confidence,
+                            regime=signal.regime,
+                        )
 
             # ── Update open positions ──────────────────────────────────────────
-            trader.update_positions(prices, features_map)
+            exits = trader.update_positions(prices, features_map)
+            for exit_fill in exits:
+                capital_val = float(trader.capital)
+                pnl_pct = exit_fill.pnl / capital_val * 100 if capital_val else 0
+                _append_trade(exit_fill, "", 0.0, 0.0, 0.0, 0.0)
+                notifier.notify_exit(
+                    symbol=exit_fill.symbol,
+                    price=exit_fill.price,
+                    pnl=exit_fill.pnl,
+                    pnl_pct=pnl_pct,
+                    reason=exit_fill.reason.split()[0],
+                    qty=exit_fill.qty,
+                )
 
             # ── Check circuit breakers ─────────────────────────────────────────
-            state = trader.circuit.check_all(
+            cb_state = trader.circuit.check_all(
                 daily_pnl_pct=trader.summary()["daily_pnl_pct"],
                 daily_dd_pct=trader.summary()["max_dd_pct"],
             )
-            if state.broken:
-                logger.critical("CIRCUIT BREAK: {}. Stopping paper session.", state.reason)
+            if cb_state.broken:
+                logger.critical("CIRCUIT BREAK: {}. Stopping paper session.", cb_state.reason)
+                notifier.notify_circuit_break(str(cb_state.reason))
+                _write_state({
+                    "running": False, "circuit_broken": True,
+                    "circuit_reason": str(cb_state.reason),
+                    "symbols": symbols, "interval": interval_min, "capital": capital,
+                })
                 break
+
+            # ── Write state for dashboard ──────────────────────────────────────
+            s = trader.summary()
+            open_pos = [
+                {"symbol": sym, "direction": "LONG" if pos.direction == 1 else "SHORT",
+                 "entry": pos.entry_price, "qty": pos.qty,
+                 "mtm": pos.direction * (prices.get(sym, pos.entry_price) - pos.entry_price) * pos.qty}
+                for sym, pos in trader._positions.items()
+            ]
+            _write_state({
+                "running":        True,
+                "symbols":        symbols,
+                "interval":       interval_min,
+                "capital":        capital,
+                "equity":         s["equity"],
+                "total_pnl":      s["total_pnl"],
+                "total_pnl_pct":  s["total_pnl_pct"],
+                "daily_pnl_pct":  s["daily_pnl_pct"],
+                "max_dd_pct":     s["max_dd_pct"],
+                "trades":         s["total_trades"],
+                "win_rate":       s["win_rate"],
+                "profit_factor":  s["profit_factor"],
+                "positions":      open_pos,
+                "circuit_broken": False,
+                "circuit_reason": "",
+                "last_update":    now.strftime("%H:%M:%S"),
+                "signals_today":  bar_count,
+                "market_open":    True,
+                "pid":            os.getpid(),
+            })
 
             # ── Print status ───────────────────────────────────────────────────
             print_status_table(trader, symbols, prices)
@@ -226,6 +361,12 @@ def run_paper_session(
 
     except KeyboardInterrupt:
         logger.info("Paper trading stopped by user")
+        s = trader.summary()
+        notifier.notify_daily_summary(
+            trades=s["total_trades"], win_rate=s["win_rate"],
+            total_pnl=s["total_pnl"], total_pnl_pct=s["total_pnl_pct"],
+            max_dd=s["max_dd_pct"],
+        )
 
     # ── Final summary ──────────────────────────────────────────────────────────
     summary = trader.summary()

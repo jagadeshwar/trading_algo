@@ -31,6 +31,22 @@ def _load_trades_from_db() -> pd.DataFrame:
                 ORDER BY o.created_at DESC
                 LIMIT 100
             """), conn)
+        if not df.empty:
+            return df
+    except Exception:
+        pass
+    # Fallback: read from JSONL file written by run_paper_trading.py
+    try:
+        trades_file = Path("data/trades_log.jsonl")
+        if not trades_file.exists():
+            return pd.DataFrame()
+        rows = [json.loads(l) for l in trades_file.read_text().splitlines() if l.strip()]
+        df = pd.DataFrame(rows[::-1][:100])
+        # Normalise columns to match DB schema expected by _compute_pnl_from_trades
+        df = df.rename(columns={"time": "created_at", "price": "fill_price"})
+        df["status"] = "FILLED"
+        df["qty_filled"] = df["qty"]
+        df["total_cost"] = df.get("costs", 0)
         return df
     except Exception:
         return pd.DataFrame()
@@ -49,6 +65,17 @@ def _load_signals_from_db(limit: int = 20) -> pd.DataFrame:
                 ORDER BY time DESC
                 LIMIT {limit}
             """), conn)
+        if not df.empty:
+            return df
+    except Exception:
+        pass
+    # Fallback: read from JSONL file written by run_paper_trading.py
+    try:
+        sig_file = Path("data/signals_log.jsonl")
+        if not sig_file.exists():
+            return pd.DataFrame()
+        rows = [json.loads(l) for l in sig_file.read_text().splitlines() if l.strip()]
+        df = pd.DataFrame(rows[::-1][:limit])
         return df
     except Exception:
         return pd.DataFrame()
@@ -99,6 +126,28 @@ def _compute_pnl_from_trades(trades: pd.DataFrame) -> dict:
     }
 
 
+def _show_toast() -> None:
+    """Show Streamlit toast for latest unread notification."""
+    notif_file = Path("data/.latest_notification.json")
+    if not notif_file.exists():
+        return
+    try:
+        n = json.loads(notif_file.read_text())
+        if n.get("read"):
+            return
+        event = n.get("event", "")
+        icon_map = {"EXIT_WIN": "✅", "EXIT_LOSS": "❌", "ENTRY": "🟢",
+                    "CIRCUIT": "🚨", "DAILY": "📊", "TEST": "🔔"}
+        emoji = icon_map.get(event, "🔔")
+        # Show toast
+        st.toast(f"{emoji} **{n.get('title','')}**\n\n{n.get('body','')}", icon=emoji)
+        # Mark as read
+        n["read"] = True
+        notif_file.write_text(json.dumps(n))
+    except Exception:
+        pass
+
+
 def render():
     import os, signal, time
     from production.monitoring.pages.trading_controls import (
@@ -106,6 +155,7 @@ def render():
     )
 
     st.title("📊 Live Dashboard")
+    _show_toast()
 
     # ── Trading status + quick-toggle ─────────────────────────────────────────
     running = _is_running()
@@ -191,20 +241,30 @@ def render():
     with left:
         st.subheader("Recent Signals")
         if signals.empty:
-            st.info("No signals yet. Start paper trading to see signals here.")
+            if running:
+                st.info("⏳ Paper trading is ACTIVE — waiting for the strategy to fire a signal.\n\n"
+                        "Signals fire on either:\n"
+                        "- EMA 9/21 crossover with ADX > 25 + volume > 1.2×\n"
+                        "- Strong trend continuation (ADX > 40 + DI strongly directional)\n\n"
+                        "Signals will appear here automatically when fired.")
+            else:
+                st.info("No signals yet. Start paper trading from 🎮 Trading Controls.")
         else:
             display = signals.copy()
-            display["direction"] = display["direction"].map({1: "🟢 LONG", -1: "🔴 SHORT", 0: "⬜ FLAT"})
-            display["confidence"] = display["confidence"].apply(lambda x: f"{x:.0%}")
+            display["direction"] = display["direction"].apply(
+                lambda x: "🟢 LONG" if int(x) == 1 else ("🔴 SHORT" if int(x) == -1 else "⬜ FLAT")
+            )
+            display["confidence"] = display["confidence"].apply(lambda x: f"{float(x):.0%}")
+            display["acted_on"]   = display.get("acted_on", pd.Series([True]*len(display))).apply(
+                lambda x: "✅ Filled" if x else "⏭ Skipped"
+            )
             display["time"] = pd.to_datetime(display["time"]).dt.strftime("%d %b %H:%M")
             display = display.rename(columns={
                 "time": "Time", "symbol": "Symbol", "direction": "Direction",
-                "confidence": "Confidence", "regime": "Regime",
+                "confidence": "Confidence", "regime": "Regime", "acted_on": "Result",
             })
-            st.dataframe(
-                display[["Time", "Symbol", "Direction", "Confidence", "Regime"]],
-                use_container_width=True, hide_index=True,
-            )
+            cols = [c for c in ["Time", "Symbol", "Direction", "Confidence", "Regime", "Result"] if c in display.columns]
+            st.dataframe(display[cols], use_container_width=True, hide_index=True)
 
     with right:
         st.subheader("Recent Trades")
