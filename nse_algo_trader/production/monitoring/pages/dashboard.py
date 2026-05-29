@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 import json
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -10,7 +10,38 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-IST = ZoneInfo("Asia/Kolkata")
+IST     = ZoneInfo("Asia/Kolkata")
+PROJECT = Path(__file__).parents[3]   # nse_algo_trader/
+
+
+def _next_expiry(symbol: str) -> str:
+    """Next NSE weekly expiry (Thursday) for index symbols, monthly for equities."""
+    today = date.today()
+    days_ahead = (3 - today.weekday()) % 7   # 3 = Thursday
+    if days_ahead == 0:
+        days_ahead = 7
+    expiry = today + timedelta(days=days_ahead)
+    if "-EQ" in symbol:
+        # Monthly: last Thursday of the month
+        # Find last Thursday in the current month
+        import calendar
+        year, month = today.year, today.month
+        last_day = calendar.monthrange(year, month)[1]
+        for d in range(last_day, last_day - 7, -1):
+            if date(year, month, d).weekday() == 3:
+                expiry = date(year, month, d)
+                if expiry <= today:   # already passed — go to next month
+                    if month == 12:
+                        year, month = year + 1, 1
+                    else:
+                        month += 1
+                    last_day = calendar.monthrange(year, month)[1]
+                    for dd in range(last_day, last_day - 7, -1):
+                        if date(year, month, dd).weekday() == 3:
+                            expiry = date(year, month, dd)
+                            break
+                break
+    return expiry.strftime("%d %b")
 
 
 @st.cache_data(ttl=15)
@@ -18,9 +49,9 @@ def _fetch_live_prices(symbols: tuple) -> dict:
     """Fetch live LTP for each symbol from Fyers. Cached 15s to avoid API spam."""
     try:
         import sys
-        sys.path.insert(0, str(Path(__file__).parents[3]))
+        sys.path.insert(0, str(PROJECT))
         from dotenv import load_dotenv
-        load_dotenv()
+        load_dotenv(PROJECT / ".env")
         from auth import get_fyers_client
         fyers = get_fyers_client()
         prices = {}
@@ -40,7 +71,7 @@ def _live_equity(state: dict) -> tuple[float, float, str]:
     capital   = float(state.get("capital", 0))
     if not positions:
         # No open positions — equity = capital + closed P&L from JSONL
-        trades_file = Path("data/trades_log.jsonl")
+        trades_file = PROJECT / "data/trades_log.jsonl"
         closed_pnl = 0.0
         if trades_file.exists():
             try:
@@ -65,7 +96,7 @@ def _live_equity(state: dict) -> tuple[float, float, str]:
         unrealized += dirn * (price - entry) * qty
 
     # Equity = cash held + unrealized MTM + closed P&L
-    trades_file = Path("data/trades_log.jsonl")
+    trades_file = PROJECT / "data/trades_log.jsonl"
     closed_pnl = 0.0
     if trades_file.exists():
         try:
@@ -103,7 +134,7 @@ def _load_trades_from_db() -> pd.DataFrame:
         pass
     # Fallback: read from JSONL file written by run_paper_trading.py
     try:
-        trades_file = Path("data/trades_log.jsonl")
+        trades_file = PROJECT / "data/trades_log.jsonl"
         if not trades_file.exists():
             return pd.DataFrame()
         rows = [json.loads(l) for l in trades_file.read_text().splitlines() if l.strip()]
@@ -137,7 +168,7 @@ def _load_signals_from_db(limit: int = 20) -> pd.DataFrame:
         pass
     # Fallback: read from JSONL file written by run_paper_trading.py
     try:
-        sig_file = Path("data/signals_log.jsonl")
+        sig_file = PROJECT / "data/signals_log.jsonl"
         if not sig_file.exists():
             return pd.DataFrame()
         rows = [json.loads(l) for l in sig_file.read_text().splitlines() if l.strip()]
@@ -194,7 +225,7 @@ def _compute_pnl_from_trades(trades: pd.DataFrame) -> dict:
 
 def _show_toast() -> None:
     """Show Streamlit toast for latest unread notification."""
-    notif_file = Path("data/.latest_notification.json")
+    notif_file = PROJECT / "data/.latest_notification.json"
     if not notif_file.exists():
         return
     try:
@@ -356,10 +387,13 @@ def render():
     st.divider()
 
     # ── Trade Journal ─────────────────────────────────────────────────────────
-    st.subheader("Trade Journal")
-    st.caption("Every entry and exit with capital impact. Green = profit, Red = loss.")
+    tj_hdr, tj_btn = st.columns([4, 1])
+    tj_hdr.subheader("Trade Journal")
+    if tj_btn.button("🔄 Refresh", use_container_width=True):
+        st.cache_data.clear()
+        st.rerun()
 
-    trades_file = Path("data/trades_log.jsonl")
+    trades_file = PROJECT / "data/trades_log.jsonl"
     if not trades_file.exists():
         st.info("No trades yet. Start paper trading — every entry and exit will appear here automatically.")
     else:
@@ -368,76 +402,95 @@ def render():
             if not raw_rows:
                 st.info("No trades yet.")
             else:
+                # Fetch live prices for all unique symbols in the journal
+                unique_syms = tuple({r["symbol"] for r in raw_rows})
+                live = _fetch_live_prices(unique_syms)
+                fetched_at = live.get("_at", "—")
+
                 journal = []
                 for r in reversed(raw_rows):
                     trade_type = r.get("type", "")
                     pnl        = float(r.get("pnl", 0))
-                    symbol     = r.get("symbol", "").replace("NSE:", "").replace("-EQ", "").replace("-INDEX", "")
+                    sym_raw    = r.get("symbol", "")
+                    symbol     = sym_raw.replace("NSE:", "").replace("-EQ", "").replace("-INDEX", "")
                     direction  = r.get("direction", "")
-                    cap_before = float(r.get("capital_before", 0))
                     cap_after  = float(r.get("capital_after", 0))
-                    cap_change = cap_after - cap_before
+                    live_price = live.get(sym_raw)
+                    expiry     = _next_expiry(sym_raw)
 
                     if trade_type == "ENTRY":
-                        deployed = float(r.get("price", 0)) * int(r.get("qty", 0))
+                        entry_px = float(r.get("price", 0))
+                        qty      = int(r.get("qty", 0))
+                        deployed = entry_px * qty
+                        dirn     = 1 if direction == "LONG" else -1
+                        live_mtm = (dirn * (live_price - entry_px) * qty) if live_price else None
                         journal.append({
-                            "Time":       pd.to_datetime(r["time"]).strftime("%d %b %H:%M"),
-                            "Type":       "🟢 LONG ENTRY" if direction == "LONG" else "🔴 SHORT ENTRY",
-                            "Symbol":     symbol,
-                            "Qty":        r.get("qty"),
-                            "Price":      f"₹{float(r.get('price',0)):,.2f}",
-                            "Stop":       f"₹{float(r.get('stop',0)):,.2f}",
-                            "Target":     f"₹{float(r.get('target',0)):,.2f}",
-                            "Deployed":   f"₹{deployed:,.0f}",
-                            "P&L":        "—",
-                            "Capital":    f"₹{cap_after:,.0f}" if cap_after else "—",
-                            "Result":     "🔵 Open",
+                            "Time":          pd.to_datetime(r["time"]).strftime("%d %b %H:%M"),
+                            "Type":          "🟢 LONG" if direction == "LONG" else "🔴 SHORT",
+                            "Symbol":        symbol,
+                            "Qty":           qty,
+                            "Entry Price":   f"₹{entry_px:,.2f}",
+                            "Current Price": f"₹{live_price:,.2f}" if live_price else "—",
+                            "Stop":          f"₹{float(r.get('stop',0)):,.2f}",
+                            "Target":        f"₹{float(r.get('target',0)):,.2f}",
+                            "Expiry":        expiry,
+                            "Deployed":      f"₹{deployed:,.0f}",
+                            "Unrealized":    f"₹{live_mtm:+,.0f}" if live_mtm is not None else "—",
+                            "P&L":           "—",
+                            "Capital":       f"₹{cap_after:,.0f}" if cap_after else "—",
+                            "Status":        "🔵 Open",
                         })
                     elif trade_type == "EXIT":
-                        result = "✅ Profit" if pnl > 0 else ("❌ Loss" if pnl < 0 else "➖ Break-even")
+                        result = "✅ Profit" if pnl > 0 else ("❌ Loss" if pnl < 0 else "➖ B/E")
                         reason = r.get("reason", "").split()[0] if r.get("reason") else "—"
                         journal.append({
-                            "Time":       pd.to_datetime(r["time"]).strftime("%d %b %H:%M"),
-                            "Type":       "🏁 EXIT",
-                            "Symbol":     symbol,
-                            "Qty":        r.get("qty"),
-                            "Price":      f"₹{float(r.get('price',0)):,.2f}",
-                            "Stop":       "—",
-                            "Target":     "—",
-                            "Deployed":   "—",
-                            "P&L":        f"₹{pnl:+,.0f}",
-                            "Capital":    f"₹{cap_after:,.0f}" if cap_after else "—",
-                            "Result":     f"{result} ({reason})",
+                            "Time":          pd.to_datetime(r["time"]).strftime("%d %b %H:%M"),
+                            "Type":          "🏁 EXIT",
+                            "Symbol":        symbol,
+                            "Qty":           r.get("qty"),
+                            "Entry Price":   f"₹{float(r.get('entry_price',0)):,.2f}" if r.get('entry_price') else "—",
+                            "Current Price": f"₹{live_price:,.2f}" if live_price else "—",
+                            "Stop":          "—",
+                            "Target":        "—",
+                            "Expiry":        expiry,
+                            "Deployed":      "—",
+                            "Unrealized":    "—",
+                            "P&L":           f"₹{pnl:+,.0f}",
+                            "Capital":       f"₹{cap_after:,.0f}" if cap_after else "—",
+                            "Status":        f"{result} · {reason}",
                         })
 
                 df_journal = pd.DataFrame(journal)
-                # Color P&L column
-                def _style_pnl(val):
-                    if val == "—":
+
+                def _style_cell(val):
+                    if not isinstance(val, str) or val in ("—", ""):
                         return ""
                     try:
                         v = float(val.replace("₹","").replace(",","").replace("+",""))
-                        return "color: #00c896" if v > 0 else ("color: #ff4c6a" if v < 0 else "")
+                        return "color: #00c896; font-weight:600" if v > 0 else \
+                               ("color: #ff4c6a; font-weight:600" if v < 0 else "")
                     except Exception:
                         return ""
 
-                styled = df_journal.style.applymap(_style_pnl, subset=["P&L"])
+                styled = df_journal.style\
+                    .applymap(_style_cell, subset=["P&L", "Unrealized"])
                 st.dataframe(styled, use_container_width=True, hide_index=True)
+                st.caption(f"Current prices fetched at **{fetched_at}** IST · click 🔄 Refresh for latest")
 
-                # Capital summary
-                all_exits = [r for r in raw_rows if r.get("type") == "EXIT"]
+                # Summary row
+                all_exits  = [r for r in raw_rows if r.get("type") == "EXIT"]
                 total_pnl  = sum(float(r.get("pnl", 0)) for r in all_exits)
                 total_cost = sum(float(r.get("costs", 0)) for r in raw_rows)
-                wins  = [r for r in all_exits if float(r.get("pnl", 0)) > 0]
-                losses= [r for r in all_exits if float(r.get("pnl", 0)) < 0]
+                wins   = [r for r in all_exits if float(r.get("pnl", 0)) > 0]
+                losses = [r for r in all_exits if float(r.get("pnl", 0)) < 0]
 
                 st.divider()
                 sc1, sc2, sc3, sc4 = st.columns(4)
-                sc1.metric("Closed Trades",  len(all_exits))
-                sc2.metric("Net P&L",        f"₹{total_pnl:+,.0f}",
+                sc1.metric("Closed Trades", len(all_exits))
+                sc2.metric("Net P&L",       f"₹{total_pnl:+,.0f}",
                            "profit" if total_pnl > 0 else ("loss" if total_pnl < 0 else None))
-                sc3.metric("Win / Loss",     f"{len(wins)}W / {len(losses)}L")
-                sc4.metric("Total Costs",    f"₹{total_cost:,.0f}")
+                sc3.metric("Win / Loss",    f"{len(wins)}W / {len(losses)}L")
+                sc4.metric("Total Costs",   f"₹{total_cost:,.0f}")
         except Exception as e:
             st.warning(f"Could not load trade journal: {e}")
 
