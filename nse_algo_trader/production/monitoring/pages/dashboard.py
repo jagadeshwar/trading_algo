@@ -44,9 +44,9 @@ def _next_expiry(symbol: str) -> str:
     return expiry.strftime("%d %b")
 
 
-@st.cache_data(ttl=15)
+@st.cache_data(ttl=4)
 def _fetch_live_prices(symbols: tuple) -> dict:
-    """Fetch live LTP for each symbol from Fyers. Cached 15s to avoid API spam."""
+    """Fetch live LTP for each symbol from Fyers. Cached 4s — always fresh on 5s auto-refresh."""
     try:
         import sys
         sys.path.insert(0, str(PROJECT))
@@ -284,6 +284,7 @@ def render():
                                 format_func=lambda x: f"{x}s", label_visibility="collapsed")
     if auto:
         time.sleep(interval)
+        st.cache_data.clear()   # force fresh prices on every auto-refresh cycle
         st.rerun()
     st.divider()
 
@@ -297,27 +298,47 @@ def render():
     live_total_pnl   = live_equity - starting_capital
     live_pnl_pct     = live_total_pnl / starting_capital * 100 if starting_capital else 0
 
+    # Closed P&L from JSONL (realised only)
+    trades_file = PROJECT / "data/trades_log.jsonl"
+    closed_pnl  = 0.0
+    closed_costs = 0.0
+    closed_count = 0
+    try:
+        if trades_file.exists():
+            rows = [json.loads(l) for l in trades_file.read_text().splitlines() if l.strip()]
+            for r in rows:
+                if r.get("type") == "EXIT":
+                    closed_pnl   += float(r.get("pnl", 0))
+                    closed_costs += float(r.get("costs", 0))
+                    closed_count += 1
+                elif r.get("type") == "ENTRY":
+                    closed_costs += float(r.get("costs", 0))
+    except Exception:
+        pass
+
     # ── P&L Hero Cards ────────────────────────────────────────────────────────
     st.subheader("Profit & Loss")
     c1, c2, c3, c4, c5 = st.columns(5)
 
     with c1:
-        st.metric("Live Equity",   f"₹{live_equity:,.0f}",
+        st.metric("Live Equity",    f"₹{live_equity:,.0f}",
                   f"{live_pnl_pct:+.2f}% vs start", delta_color="normal")
     with c2:
-        st.metric("Total P&L",     f"₹{live_total_pnl:+,.0f}",
-                  f"Unrealized ₹{unrealized_pnl:+,.0f}" if unrealized_pnl else None,
+        st.metric("Realised P&L",   f"₹{closed_pnl:+,.0f}",
+                  f"net of costs ₹{(closed_pnl - closed_costs):+,.0f}",
                   delta_color="normal")
     with c3:
-        st.metric("Total Trades",  stats["total_trades"])
+        st.metric("Unrealized P&L", f"₹{unrealized_pnl:+,.0f}" if unrealized_pnl else "₹0",
+                  f"live @ {prices_at}" if prices_at != "—" else "no open positions",
+                  delta_color="normal")
     with c4:
-        st.metric("Win Rate",      f"{stats['win_rate']}%",
+        st.metric("Win Rate",       f"{stats['win_rate']}%",
                   "✓ above target" if stats["win_rate"] >= 52 else "✗ below 52%")
     with c5:
-        st.metric("Profit Factor", f"{stats['profit_factor']}",
+        st.metric("Profit Factor",  f"{stats['profit_factor']}",
                   "✓ good" if stats["profit_factor"] >= 1.4 else "needs improvement")
 
-    st.caption(f"Prices fetched at **{prices_at}** · Costs paid: ₹{stats['total_costs']:,.0f}")
+    st.caption(f"Live prices as of **{prices_at}** IST · auto-refresh clears cache each cycle · costs paid ₹{closed_costs:,.0f}")
     st.divider()
 
     # ── P&L Explanation ───────────────────────────────────────────────────────
