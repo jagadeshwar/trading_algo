@@ -175,18 +175,33 @@ class MomentumStrategy:
         di_long     = f.get("di_diff", 0.0) > 0
         di_short    = f.get("di_diff", 0.0) < 0
         vix_ok      = (vix is None) or (vix < self.cfg.vix_max)
+        adx         = f.get("adx", 0.0)
+        dist21      = f.get("dist_ema_21", 0.0)
+        di_diff     = f.get("di_diff", 0.0)
 
-        if not (vol_ok and trending and vix_ok):
+        # Trend continuation: strong ADX + price on correct side of EMA21
+        strong_trend_long  = adx >= 40 and dist21 > 0.001 and di_diff > 15
+        strong_trend_short = adx >= 40 and dist21 < -0.001 and di_diff < -15
+
+        vol_ok_relaxed = f.get("vol_ratio", 0.0) >= 0.9  # relaxed for continuation
+
+        if not (vix_ok and trending):
             return None
 
         direction = 0
         reason = ""
-        if cross_long and di_long:
+        if vol_ok and cross_long and di_long:
             direction = 1
-            reason = f"EMA9 crossed above EMA21 | ADX={f.get('adx',0):.1f} | vol_ratio={f.get('vol_ratio',0):.2f}"
-        elif cross_short and di_short:
+            reason = f"EMA9 crossed above EMA21 | ADX={adx:.1f} | vol_ratio={f.get('vol_ratio',0):.2f}"
+        elif vol_ok and cross_short and di_short:
             direction = -1
-            reason = f"EMA9 crossed below EMA21 | ADX={f.get('adx',0):.1f} | vol_ratio={f.get('vol_ratio',0):.2f}"
+            reason = f"EMA9 crossed below EMA21 | ADX={adx:.1f} | vol_ratio={f.get('vol_ratio',0):.2f}"
+        elif vol_ok_relaxed and strong_trend_long:
+            direction = 1
+            reason = f"Strong trend continuation LONG | ADX={adx:.1f} | dist_ema21={dist21:.4f}"
+        elif vol_ok_relaxed and strong_trend_short:
+            direction = -1
+            reason = f"Strong trend continuation SHORT | ADX={adx:.1f} | dist_ema21={dist21:.4f}"
 
         if direction == 0:
             return None
