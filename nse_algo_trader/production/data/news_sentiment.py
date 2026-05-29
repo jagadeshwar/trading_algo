@@ -39,27 +39,42 @@ IST         = ZoneInfo("Asia/Kolkata")
 CACHE_FILE  = Path("data/.news_cache.json")
 CACHE_TTL_S = 300   # refresh every 5 minutes
 
-# RSS feeds
+# RSS feeds — general market + banking sector
 _FEEDS = [
     "https://economictimes.indiatimes.com/markets/rss.cms",
     "https://www.moneycontrol.com/rss/MCtopnews.xml",
+    "https://economictimes.indiatimes.com/industry/banking/rss.cms",
+    "https://www.moneycontrol.com/rss/banking.xml",
 ]
 
-# Symbol → search keywords
+# Symbol → search keywords (broader for better headline matching)
 _SYMBOL_KEYWORDS: dict[str, list[str]] = {
-    "NIFTY50":     ["nifty", "sensex", "market", "index", "equity"],
-    "NIFTYBANK":   ["bank nifty", "banknifty", "banking", "bank index"],
-    "RELIANCE":    ["reliance", "ril"],
-    "HDFCBANK":    ["hdfc bank", "hdfcbank"],
-    "ICICIBANK":   ["icici bank", "icicibank"],
-    "SBIN":        ["sbi", "state bank", "sbin"],
-    "TCS":         ["tcs", "tata consultancy"],
-    "INFY":        ["infosys", "infy"],
-    "KOTAKBANK":   ["kotak bank", "kotak mahindra"],
-    "LT":          ["larsen", "l&t", "lt"],
-    "ITC":         ["itc"],
-    "AXISBANK":    ["axis bank", "axisbank"],
+    "NIFTY50":   [
+        "nifty 50", "nifty50", "nifty index", "sensex", "stock market",
+        "equity market", "dalal street", "bse", "nse", "indian market",
+        "nifty future", "nifty option",
+    ],
+    "NIFTYBANK": [
+        "bank nifty", "banknifty", "nifty bank", "banking index",
+        "bank index", "psu bank", "private bank", "banking sector",
+        "rbi", "repo rate", "monetary policy", "credit growth",
+        "npa", "banking stock", "bank nifty future", "bank nifty option",
+    ],
+    "RELIANCE":  ["reliance", "ril", "reliance industries", "mukesh ambani", "jio"],
+    "HDFCBANK":  ["hdfc bank", "hdfcbank", "hdfc ltd"],
+    "ICICIBANK": ["icici bank", "icicibank", "icici"],
+    "SBIN":      ["sbi", "state bank of india", "state bank"],
+    "TCS":       ["tcs", "tata consultancy", "tata cs"],
+    "INFY":      ["infosys", "infy", "narayana murthy"],
+    "KOTAKBANK": ["kotak bank", "kotak mahindra bank", "kotak mahindra"],
+    "LT":        ["larsen & toubro", "larsen and toubro", "l&t"],
+    "ITC":       ["itc limited", "itc ltd", " itc "],
+    "AXISBANK":  ["axis bank", "axisbank"],
 }
+
+# Symbols that fall back to NIFTY50 score when no specific headlines found
+# (highly correlated indices)
+_FALLBACK_TO_NIFTY50 = {"NIFTYBANK"}
 
 # Positive/negative financial keywords for fallback scorer
 _POS_WORDS = {
@@ -79,6 +94,7 @@ class NewsSentiment:
 
     def __init__(self) -> None:
         self._cache: dict = {}
+        self._headline_cache: dict = {}
         self._cache_time: float = 0.0
         self._vader = None
         self._init_scorer()
@@ -86,10 +102,19 @@ class NewsSentiment:
     # ── Public API ─────────────────────────────────────────────────────────────
 
     def score(self, symbol: str) -> float:
-        """Return sentiment score [-1, +1] for a symbol. Cached 5 minutes."""
+        """Return sentiment score [-1, +1] for a symbol. Cached 5 minutes.
+
+        If no specific headlines found for the symbol and it's in
+        _FALLBACK_TO_NIFTY50 (e.g. NIFTYBANK), uses NIFTY50 score as proxy.
+        """
         self._refresh_if_stale()
         short = self._normalise_symbol(symbol)
-        return float(self._cache.get(short, 0.0))
+        if short in self._cache:
+            return float(self._cache[short])
+        if short in _FALLBACK_TO_NIFTY50:
+            logger.debug("No {} headlines — using NIFTY50 sentiment as proxy", short)
+            return float(self._cache.get("NIFTY50", 0.0))
+        return 0.0
 
     def should_block(self, direction: int, symbol: str) -> bool:
         """Return True if news sentiment opposes the trade direction."""
