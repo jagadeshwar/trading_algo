@@ -29,8 +29,8 @@ FEATURE_NAMES = [
     "atr_pct", "atr_ratio", "bb_width", "bb_pct_b", "bb_squeeze",
     # Volume (4)
     "vwap_dev", "vol_ratio", "obv_norm", "vol_delta_ma",
-    # Regime (3)
-    "adx", "di_diff", "regime_heuristic",
+    # Regime (4) — heuristic + HMM
+    "adx", "di_diff", "regime_heuristic", "regime_hmm",
     # Target (1)
     "target",
 ]
@@ -59,8 +59,12 @@ class FeatureEngineer:
         self.target_bars = target_bars
         self.volume_ma_period = volume_ma_period
 
-    def compute(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Return a new DataFrame with all features appended. Drops NaN rows."""
+    def compute(self, df: pd.DataFrame, hmm_model_path: str | None = None) -> pd.DataFrame:
+        """Return a new DataFrame with all features appended. Drops NaN rows.
+
+        If hmm_model_path is provided (or models/regime_hmm.pkl exists),
+        the HMM regime label is appended as an additional feature.
+        """
         d = df.copy()
         self._price_features(d)
         self._bar_features(d)
@@ -69,6 +73,7 @@ class FeatureEngineer:
         self._volatility_features(d)
         self._volume_features(d)
         self._regime_features(d)
+        self._hmm_regime(d, hmm_model_path)
         self._target(d)
         keep = [c for c in FEATURE_NAMES if c in d.columns]
         result = d[keep].dropna()
@@ -205,6 +210,19 @@ class FeatureEngineer:
                 )
             )
             d["regime_heuristic"] = regime
+
+    def _hmm_regime(self, d: pd.DataFrame, model_path: str | None) -> None:
+        """Append HMM regime label if a trained model is available."""
+        path = Path(model_path) if model_path else Path("models/regime_hmm.pkl")
+        if not path.exists():
+            return
+        try:
+            from production.models.regime_hmm import RegimeDetector
+            det    = RegimeDetector().load(path)
+            labels = det.predict(d)
+            d["regime_hmm"] = labels.reindex(d.index)
+        except Exception as e:
+            logger.debug("HMM regime skipped: {}", e)
 
     # ── Target label ──────────────────────────────────────────────────────────
 
