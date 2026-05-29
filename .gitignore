@@ -1,0 +1,56 @@
+# ── Secrets — NEVER commit ────────────────────────────────────────────────────
+nse_algo_trader/.env
+nse_algo_trader/fyers_token.txt
+nse_algo_trader/setup_credentials.py
+**/.env.local
+
+# ── Virtual environments ───────────────────────────────────────────────────────
+nse_algo_trader/algo_env/
+**/venv/
+**/.venv/
+
+# ── Large data files — stored externally / mounted as volumes ─────────────────
+nse_algo_trader/data/ohlcv/
+nse_algo_trader/data/features/
+nse_algo_trader/data/options/
+nse_algo_trader/data/.paper_trader.pid
+nse_algo_trader/data/.top_up_command.json
+
+# ── Trained models — versioned via MLflow ─────────────────────────────────────
+nse_algo_trader/models/*.pkl
+nse_algo_trader/models/*.joblib
+nse_algo_trader/models/*.cbm
+
+# ── Runtime files ──────────────────────────────────────────────────────────────
+nse_algo_trader/logs/
+nse_algo_trader/mlruns/
+nse_algo_trader/optuna.db
+nse_algo_trader/data/paper_trader_state.json
+nse_algo_trader/data/.topup_history.json
+nse_algo_trader/misc_doc
+.claude/
+
+# ── Python cache ──────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.coverage
+htmlcov/
+*.egg-info/
+dist/
+build/
+
+# ── Jupyter ────────────────────────────────────────────────────────────────────
+.ipynb_checkpoints/
+nse_algo_trader/research/notebooks/.ipynb_checkpoints/
+
+# ── macOS ──────────────────────────────────────────────────────────────────────
+.DS_Store
+.AppleDouble
+
+# ── IDE ────────────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo

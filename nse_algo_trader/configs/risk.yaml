@@ -1,0 +1,22 @@
+max_drawdown_pct: 5.0       # pause trading if daily DD exceeds this
+daily_loss_pct: 2.0         # hard stop — system halts for the day
+max_capital_use: 60.0       # max margin utilisation at any time (%)
+max_position_pct: 10.0      # max capital per single instrument (%)
+correlation_threshold: 0.7  # block new trade if correlated with open position
+kelly_fraction: 0.5         # half-Kelly for safety (× full Kelly output)
+
+circuit_breakers:
+  websocket_stale_sec: 30       # pause entries if no tick for this long
+  websocket_halt_sec: 60        # full halt if no tick for this long
+  api_heartbeat_sec: 30         # switch to fallback if Fyers heartbeat missing
+  slippage_spike_multiplier: 3  # trigger if slippage > 3× expected on last 5 trades
+  vix_spike_pct: 30             # flatten options if VIX spikes > 30% in 15 min
+  max_order_rejections: 3       # stop trading after this many rejections in 10 min
+  model_confidence_low: 0.05    # trigger if all outputs < this (model broken)
+  model_confidence_high: 0.95   # trigger if all outputs > this (model broken)
+
+portfolio:
+  max_sector_exposure_pct: 30.0 # no single sector > 30% exposure
+  max_beta: 1.5                 # portfolio beta vs Nifty
+  max_var_pct: 3.0              # max 1-day VaR at 95% confidence (% of capital)
+  max_net_delta_pct: 20.0       # net options delta within ±20% of capital

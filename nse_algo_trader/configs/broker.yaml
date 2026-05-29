@@ -1,0 +1,35 @@
+primary: fyers
+fallback: zerodha
+
+fyers:
+  app_id: ${FYERS_APP_ID}
+  secret: ${FYERS_SECRET}
+  redirect_uri: ${FYERS_REDIRECT_URI}
+  token_file: fyers_token.txt
+  log_path: logs/
+
+zerodha:
+  api_key: ${ZERODHA_API_KEY}
+  api_secret: ${ZERODHA_API_SECRET}
+
+# Latency thresholds (milliseconds) — breach triggers action
+latency_ms:
+  signal_generation: 100    # skip bar if exceeded
+  broker_api: 200           # alert if exceeded
+  websocket_lag: 500        # alert; reduce order size if > 2000ms
+  order_ack: 1000           # alert if exceeded
+  fill_delay: 3000          # alert; switch broker if > 5000ms
+  tick_to_trade: 500        # full pipeline target
+
+# NSE transaction costs for backtest modeling
+transaction_costs:
+  brokerage_per_order: 20       # ₹20 flat per executed order (Fyers)
+  stt_equity_sell_pct: 0.025    # 0.025% on sell side (equity delivery)
+  stt_fno_sell_pct: 0.1         # 0.1% on sell side (F&O options, on premium)
+  exchange_fee_pct: 0.00345     # NSE transaction charge
+  gst_pct: 18.0                 # on brokerage + exchange fees
+  sebi_fee_per_crore: 10        # ₹10 per crore turnover
+  stamp_duty_equity_buy_pct: 0.003
+  stamp_duty_fno_buy_pct: 0.002
+  slippage_pct: 0.02            # 0.02% assumed slippage per trade
+  partial_fill_rate: 0.80       # 80% fill rate on limit orders

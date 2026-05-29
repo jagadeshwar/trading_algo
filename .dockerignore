@@ -1,0 +1,34 @@
+# Python
+**/__pycache__
+**/*.pyc
+**/*.pyo
+**/.pytest_cache
+
+# Virtual environments
+nse_algo_trader/algo_env/
+**/venv/
+**/.venv/
+
+# Secrets — never bake into image
+nse_algo_trader/.env
+nse_algo_trader/fyers_token.txt
+
+# Large data — mounted as volumes
+nse_algo_trader/data/ohlcv/
+nse_algo_trader/data/features/
+nse_algo_trader/data/options/
+nse_algo_trader/models/*.pkl
+nse_algo_trader/models/*.joblib
+
+# Logs
+nse_algo_trader/logs/
+
+# MLflow
+nse_algo_trader/mlruns/
+
+# macOS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
