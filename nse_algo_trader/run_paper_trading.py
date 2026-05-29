@@ -255,6 +255,23 @@ def run_paper_session(
             prices: dict[str, float] = {}
             features_map: dict[str, object] = {}
 
+            # ── Refresh features from latest OHLCV on every bar ───────────────
+            try:
+                from production.data.fetcher import DataFetcher
+                from production.data.features import FeatureEngineer
+                _fetcher = DataFetcher(fyers)
+                _fe      = FeatureEngineer()
+                _fetcher.incremental_update(days=1)   # one call refreshes all symbols
+                for sym in symbols:
+                    try:
+                        ohlcv = _fetcher.load_ohlcv(sym, interval_min)
+                        feats = _fe.compute(ohlcv)
+                        _fe.save(feats, sym, interval_min)
+                    except Exception as _e:
+                        logger.debug("Feature refresh skipped for {}: {}", sym, _e)
+            except Exception as _e:
+                logger.debug("Feature refresh error: {}", _e)
+
             # ── Fetch prices and features for each symbol ─────────────────────
             vix = fetch_vix(fyers) if fyers else None
             # Successful API contact = heartbeat
