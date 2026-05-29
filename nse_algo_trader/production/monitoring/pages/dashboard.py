@@ -482,14 +482,16 @@ def render():
                 v = o.get("pe_ltp")
                 return f"₹{v:,.2f}" if v else "—"
 
-            display["created_at"]  = pd.to_datetime(display["created_at"]).dt.strftime("%d %b %H:%M")
-            display["side"]        = display["side"].map({"BUY": "🟢 BUY", "SELL": "🔴 SELL"})
-            display["fill_price"]  = display["fill_price"].apply(
-                                         lambda x: f"₹{x:,.2f}" if pd.notna(x) else "—")
+            # Compute derived columns BEFORE formatting fill_price to string
             display["Status"]      = display.apply(_rt_status, axis=1)
             display["ATM Strike"]  = display.apply(_rt_atm, axis=1)
             display["Call(CE) ₹"]  = display.apply(_rt_ce, axis=1)
             display["Put(PE) ₹"]   = display.apply(_rt_pe, axis=1)
+            # Format display columns last
+            display["created_at"]  = pd.to_datetime(display["created_at"]).dt.strftime("%d %b %H:%M")
+            display["side"]        = display["side"].map({"BUY": "🟢 BUY", "SELL": "🔴 SELL"})
+            display["fill_price"]  = display["fill_price"].apply(
+                                         lambda x: f"₹{x:,.2f}" if pd.notna(x) else "—")
             display = display.rename(columns={
                 "created_at": "Time", "symbol": "Symbol",
                 "side": "Side", "qty": "Qty", "fill_price": "Buy/Sell Price",
