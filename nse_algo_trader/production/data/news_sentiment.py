@@ -39,12 +39,13 @@ IST         = ZoneInfo("Asia/Kolkata")
 CACHE_FILE  = Path("data/.news_cache.json")
 CACHE_TTL_S = 300   # refresh every 5 minutes
 
-# RSS feeds — general market + banking sector
+# RSS feeds — verified working as of 2026-05-29
 _FEEDS = [
-    "https://economictimes.indiatimes.com/markets/rss.cms",
-    "https://www.moneycontrol.com/rss/MCtopnews.xml",
-    "https://economictimes.indiatimes.com/industry/banking/rss.cms",
-    "https://www.moneycontrol.com/rss/banking.xml",
+    "https://economictimes.indiatimes.com/rssfeedsdefault.cms",    # 76 entries
+    "https://www.thehindubusinessline.com/markets/?service=rss",   # 60 entries
+    "https://www.livemint.com/rss/markets",                        # 35 entries
+    "https://www.moneycontrol.com/rss/marketreports.xml",          # 4 entries
+    "https://www.moneycontrol.com/rss/MCtopnews.xml",              # 1 entry
 ]
 
 # Symbol → search keywords (broader for better headline matching)
