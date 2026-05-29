@@ -1,0 +1,32 @@
+# Technical indicator periods
+ema_periods: [9, 21, 50, 200]
+rsi_period: 14
+atr_period: 14
+adx_period: 14
+volume_ma_period: 20
+
+macd:
+  fast: 12
+  slow: 26
+  signal: 9
+
+bollinger:
+  period: 20
+  std: 2.0
+
+# Return lookback periods (bars)
+return_periods: [1, 5, 10, 20]
+lag_periods: [1, 2, 3, 5]
+
+# Feature groups to compute (toggle for ablation studies)
+groups:
+  price: true
+  bar: true
+  ema: true
+  momentum: true
+  volatility: true
+  volume: true
+  regime: true
+
+# Normalization — applied before saving to feature store
+normalize: true

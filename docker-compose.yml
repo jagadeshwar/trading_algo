@@ -1,0 +1,119 @@
+version: "3.9"
+
+# NSE Algo Trader — full stack
+# Usage:
+#   docker-compose up -d           # start everything
+#   docker-compose logs -f app     # watch app logs
+#   docker-compose exec app python auth.py   # daily Fyers login
+#   docker-compose down            # stop everything
+
+services:
+
+  # ── PostgreSQL 17 + TimescaleDB ─────────────────────────────────────────────
+  db:
+    image: timescale/timescaledb:latest-pg17
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB:       nse_algo
+      POSTGRES_USER:     postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-nse_algo_pass}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      # Auto-apply schema on first run
+      - ./nse_algo_trader/production/db/schema.sql:/docker-entrypoint-initdb.d/01_schema.sql
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d nse_algo"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Redis (event bus + pub/sub) ──────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+  # ── Streamlit Dashboard ──────────────────────────────────────────────────────
+  dashboard:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    env_file:
+      - nse_algo_trader/.env
+    environment:
+      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:-nse_algo_pass}@db:5432/nse_algo
+      REDIS_URL:    redis://redis:6379/0
+    volumes:
+      - ./nse_algo_trader/data:/app/nse_algo_trader/data
+      - ./nse_algo_trader/models:/app/nse_algo_trader/models
+      - ./nse_algo_trader/logs:/app/nse_algo_trader/logs
+      - ./nse_algo_trader/fyers_token.txt:/app/nse_algo_trader/fyers_token.txt
+      - ./nse_algo_trader/configs:/app/nse_algo_trader/configs
+    ports:
+      - "8501:8501"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8501/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ── Paper Trading Engine ─────────────────────────────────────────────────────
+  trader:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file:
+      - nse_algo_trader/.env
+    environment:
+      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:-nse_algo_pass}@db:5432/nse_algo
+      REDIS_URL:    redis://redis:6379/0
+    volumes:
+      - ./nse_algo_trader/data:/app/nse_algo_trader/data
+      - ./nse_algo_trader/models:/app/nse_algo_trader/models
+      - ./nse_algo_trader/logs:/app/nse_algo_trader/logs
+      - ./nse_algo_trader/fyers_token.txt:/app/nse_algo_trader/fyers_token.txt
+      - ./nse_algo_trader/configs:/app/nse_algo_trader/configs
+    command: >
+      python run_paper_trading.py
+      --symbols NSE:HDFCBANK-EQ NSE:ICICIBANK-EQ NSE:RELIANCE-EQ
+      --interval 15
+      --capital 1000000
+    profiles:
+      - trading   # only starts with: docker-compose --profile trading up
+
+  # ── Scheduler (daily data refresh + token reminder) ─────────────────────────
+  scheduler:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file:
+      - nse_algo_trader/.env
+    environment:
+      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:-nse_algo_pass}@db:5432/nse_algo
+    volumes:
+      - ./nse_algo_trader/data:/app/nse_algo_trader/data
+      - ./nse_algo_trader/logs:/app/nse_algo_trader/logs
+      - ./nse_algo_trader/fyers_token.txt:/app/nse_algo_trader/fyers_token.txt
+    command: python scheduler.py
+    profiles:
+      - trading
+
+volumes:
+  postgres_data:
+    driver: local
