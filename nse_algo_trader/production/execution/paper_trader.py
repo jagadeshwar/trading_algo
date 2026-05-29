@@ -284,6 +284,13 @@ class PaperTrader:
     def _check_exit(
         self, pos: Position, price: float, features: dict | None
     ) -> tuple[bool, str]:
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        now_ist = datetime.now(ZoneInfo("Asia/Kolkata")).time()
+        from datetime import time as dtime
+        if now_ist >= dtime(15, 25):
+            return True, f"EOD_EXIT 15:25 forced close price={price:.2f}"
+
         if pos.direction == 1:
             if price <= pos.stop_price:
                 return True, f"STOP price={price:.2f} stop={pos.stop_price:.2f}"
