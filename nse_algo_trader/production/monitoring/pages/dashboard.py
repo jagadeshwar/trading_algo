@@ -44,9 +44,19 @@ def _next_expiry(symbol: str) -> str:
     return expiry.strftime("%d %b")
 
 
-@st.cache_data(ttl=4)
 def _fetch_live_prices(symbols: tuple) -> dict:
-    """Fetch live LTP for each symbol from Fyers. Cached 4s — always fresh on 5s auto-refresh."""
+    """Fetch live LTP via session-state cache (works correctly with st.rerun)."""
+    import time as _t
+    cache_key = f"lp_cache_{hash(symbols)}"
+    time_key  = f"lp_time_{hash(symbols)}"
+    now = _t.time()
+
+    cached    = st.session_state.get(cache_key, {})
+    last_time = st.session_state.get(time_key, 0)
+
+    if cached and (now - last_time) < 4:   # reuse if < 4s old
+        return cached
+
     try:
         import sys
         sys.path.insert(0, str(PROJECT))
@@ -60,9 +70,12 @@ def _fetch_live_prices(symbols: tuple) -> dict:
             if resp.get("s") == "ok":
                 prices[sym] = float(resp["d"][0]["v"]["lp"])
         prices["_at"] = datetime.now(IST).strftime("%H:%M:%S")
-        return prices
     except Exception:
-        return {}
+        prices = cached   # keep stale on error
+
+    st.session_state[cache_key] = prices
+    st.session_state[time_key]  = now
+    return prices
 
 
 def _live_equity(state: dict) -> tuple[float, float, str]:
@@ -284,7 +297,6 @@ def render():
                                 format_func=lambda x: f"{x}s", label_visibility="collapsed")
     if auto:
         time.sleep(interval)
-        st.cache_data.clear()   # force fresh prices on every auto-refresh cycle
         st.rerun()
     st.divider()
 
@@ -396,12 +408,15 @@ def render():
             display["side"] = display["side"].map({"BUY": "🟢 BUY", "SELL": "🔴 SELL"})
             display["fill_price"] = display["fill_price"].apply(
                 lambda x: f"₹{x:,.2f}" if pd.notna(x) else "—")
+            display["status"] = display.get("type", pd.Series(["ENTRY"]*len(display))).apply(
+                lambda x: "🟢 Open" if str(x) == "ENTRY" else "✅ Closed"
+            )
             display = display.rename(columns={
                 "created_at": "Time", "symbol": "Symbol",
-                "side": "Side", "qty": "Qty", "fill_price": "Fill Price", "status": "Status",
+                "side": "Side", "qty": "Qty", "fill_price": "Buy/Sell Price", "status": "Status",
             })
             st.dataframe(
-                display[["Time", "Symbol", "Side", "Qty", "Fill Price", "Status"]],
+                display[["Time", "Symbol", "Side", "Qty", "Buy/Sell Price", "Status"]],
                 use_container_width=True, hide_index=True,
             )
 
@@ -411,7 +426,10 @@ def render():
     tj_hdr, tj_btn = st.columns([4, 1])
     tj_hdr.subheader("Trade Journal")
     if tj_btn.button("🔄 Refresh", use_container_width=True):
-        st.cache_data.clear()
+        # Clear session-state price cache to force immediate re-fetch
+        for k in list(st.session_state.keys()):
+            if k.startswith("lp_"):
+                del st.session_state[k]
         st.rerun()
 
     trades_file = PROJECT / "data/trades_log.jsonl"
@@ -428,6 +446,12 @@ def render():
                 live = _fetch_live_prices(unique_syms)
                 fetched_at = live.get("_at", "—")
 
+                # Build a set of closed symbols to determine ENTRY status
+                closed_symbols = set()
+                for r in raw_rows:
+                    if r.get("type") == "EXIT":
+                        closed_symbols.add(r.get("symbol", ""))
+
                 journal = []
                 for r in reversed(raw_rows):
                     trade_type = r.get("type", "")
@@ -440,11 +464,13 @@ def render():
                     expiry     = _next_expiry(sym_raw)
 
                     if trade_type == "ENTRY":
-                        entry_px = float(r.get("price", 0))
-                        qty      = int(r.get("qty", 0))
-                        deployed = entry_px * qty
-                        dirn     = 1 if direction == "LONG" else -1
-                        live_mtm = (dirn * (live_price - entry_px) * qty) if live_price else None
+                        entry_px  = float(r.get("price", 0))
+                        qty       = int(r.get("qty", 0))
+                        deployed  = entry_px * qty
+                        dirn      = 1 if direction == "LONG" else -1
+                        live_mtm  = (dirn * (live_price - entry_px) * qty) if live_price else None
+                        is_closed = sym_raw in closed_symbols
+                        status    = "✅ Closed" if is_closed else "🟢 Open"
                         journal.append({
                             "Time":          pd.to_datetime(r["time"]).strftime("%d %b %H:%M"),
                             "Type":          "🟢 LONG" if direction == "LONG" else "🔴 SHORT",
@@ -457,9 +483,9 @@ def render():
                             "Expiry":        expiry,
                             "Deployed":      f"₹{deployed:,.0f}",
                             "Unrealized":    f"₹{live_mtm:+,.0f}" if live_mtm is not None else "—",
-                            "P&L":           "—",
-                            "Capital":       f"₹{cap_after:,.0f}" if cap_after else "—",
-                            "Status":        "🔵 Open",
+                            "Realised P&L":  "—",
+                            "Capital After": f"₹{cap_after:,.0f}" if cap_after else "—",
+                            "Status":        status,
                         })
                     elif trade_type == "EXIT":
                         result = "✅ Profit" if pnl > 0 else ("❌ Loss" if pnl < 0 else "➖ B/E")
@@ -476,9 +502,9 @@ def render():
                             "Expiry":        expiry,
                             "Deployed":      "—",
                             "Unrealized":    "—",
-                            "P&L":           f"₹{pnl:+,.0f}",
-                            "Capital":       f"₹{cap_after:,.0f}" if cap_after else "—",
-                            "Status":        f"{result} · {reason}",
+                            "Realised P&L":  f"₹{pnl:+,.0f}",
+                            "Capital After": f"₹{cap_after:,.0f}" if cap_after else "—",
+                            "Status":        f"✅ Closed · {result} · {reason}",
                         })
 
                 df_journal = pd.DataFrame(journal)
@@ -494,7 +520,7 @@ def render():
                         return ""
 
                 styled = df_journal.style\
-                    .applymap(_style_cell, subset=["P&L", "Unrealized"])
+                    .applymap(_style_cell, subset=["Realised P&L", "Unrealized"])
                 st.dataframe(styled, use_container_width=True, hide_index=True)
                 st.caption(f"Current prices fetched at **{fetched_at}** IST · click 🔄 Refresh for latest")
 
