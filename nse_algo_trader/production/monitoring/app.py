@@ -50,34 +50,51 @@ with st.sidebar:
     st.title("NSE Algo Trader")
 
     # Clickable strategy info expander
+    import yaml as _yaml
+    try:
+        _cfg = _yaml.safe_load(Path("configs/strategy.yaml").read_text()) or {}
+        _m = _cfg.get("momentum", {}); _r = _cfg.get("regime", {})
+    except Exception:
+        _cfg = {}; _m = {}; _r = {}
+
     with st.expander("📋 Phase 1 — Momentum Strategy", expanded=False):
         st.markdown("""
 **EMA 9/21 crossover** with:
-- ADX trend filter
-- Volume confirmation
-- RSI quality gate
-- Session window 09:45–15:10
+- ADX trend filter · Volume confirmation
+- RSI quality gate · Session 09:45–15:10
 
-_Click **Strategy** in the nav below to edit rules or send a modification request._
+_Click **Strategy P1** in the nav to edit rules._
         """)
-        import yaml as _yaml
-        try:
-            _cfg = _yaml.safe_load(Path("configs/strategy.yaml").read_text()) or {}
-            _m = _cfg.get("momentum", {}); _r = _cfg.get("regime", {})
+        if _m:
             st.markdown(
-                f"Stop: **{_m.get('stop_atr_multiplier', 2)}× ATR**  "
-                f"  Target: **{_m.get('target_atr_multiplier', 3)}× ATR**  "
-                f"  ADX ≥ **{_r.get('adx_trending_threshold', 25)}**"
+                f"Stop: **{_m.get('stop_atr_multiplier', 2)}× ATR** · "
+                f"Target: **{_m.get('target_atr_multiplier', 3)}× ATR** · "
+                f"ADX ≥ **{_r.get('adx_trending_threshold', 25)}**"
             )
-        except Exception:
-            pass
+
+    with st.expander("🤖 Phase 2 — ML Enhancement", expanded=False):
+        st.markdown("""
+**HMM regime** · **XGBoost signal** · **News sentiment**
+- HMM labels each bar: RANGING / TRENDING / HIGH_VOL
+- XGBoost predicts 3-bar direction, boosts confidence
+- News sentiment blocks contra-trend entries
+
+_Click **Strategy P2** in the nav to configure._
+        """)
+        from pathlib import Path as _P
+        _hmm_ok = _P("models/regime_hmm.pkl").exists()
+        _xgb_ok = _P("models/xgb_direction.pkl").exists()
+        st.markdown(
+            f"{'🟢' if _hmm_ok else '🟡'} HMM  "
+            f"{'🟢' if _xgb_ok else '🟡'} XGBoost"
+        )
 
     st.divider()
 
     page = st.radio(
         "Navigate",
         ["📊 Dashboard", "🎮 Trading Controls", "📈 Charts", "🧪 Backtest",
-         "📋 Strategy", "⚙️ Config Editor", "🗒️ Logs"],
+         "📋 Strategy P1", "🤖 Strategy P2", "⚙️ Config Editor", "🗒️ Logs"],
         label_visibility="collapsed",
     )
     st.divider()
@@ -127,9 +144,12 @@ elif page == "📈 Charts":
 elif page == "🧪 Backtest":
     from production.monitoring.pages import backtest
     backtest.render()
-elif page == "📋 Strategy":
+elif page == "📋 Strategy P1":
     from production.monitoring.pages import strategy
     strategy.render()
+elif page == "🤖 Strategy P2":
+    from production.monitoring.pages import strategy_phase2
+    strategy_phase2.render()
 elif page == "⚙️ Config Editor":
     from production.monitoring.pages import config_editor
     config_editor.render()
