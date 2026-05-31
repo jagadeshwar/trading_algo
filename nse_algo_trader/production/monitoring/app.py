@@ -48,12 +48,36 @@ st.markdown("""
 with st.sidebar:
     st.image("https://img.icons8.com/fluency/96/stock-share.png", width=64)
     st.title("NSE Algo Trader")
-    st.caption("Phase 1 — Momentum Strategy")
+
+    # Clickable strategy info expander
+    with st.expander("📋 Phase 1 — Momentum Strategy", expanded=False):
+        st.markdown("""
+**EMA 9/21 crossover** with:
+- ADX trend filter
+- Volume confirmation
+- RSI quality gate
+- Session window 09:45–15:10
+
+_Click **Strategy** in the nav below to edit rules or send a modification request._
+        """)
+        import yaml as _yaml
+        try:
+            _cfg = _yaml.safe_load(Path("configs/strategy.yaml").read_text()) or {}
+            _m = _cfg.get("momentum", {}); _r = _cfg.get("regime", {})
+            st.markdown(
+                f"Stop: **{_m.get('stop_atr_multiplier', 2)}× ATR**  "
+                f"  Target: **{_m.get('target_atr_multiplier', 3)}× ATR**  "
+                f"  ADX ≥ **{_r.get('adx_trending_threshold', 25)}**"
+            )
+        except Exception:
+            pass
+
     st.divider()
 
     page = st.radio(
         "Navigate",
-        ["📊 Dashboard", "🎮 Trading Controls", "📈 Charts", "🧪 Backtest", "⚙️ Config Editor", "📋 Logs"],
+        ["📊 Dashboard", "🎮 Trading Controls", "📈 Charts", "🧪 Backtest",
+         "📋 Strategy", "⚙️ Config Editor", "🗒️ Logs"],
         label_visibility="collapsed",
     )
     st.divider()
@@ -103,9 +127,12 @@ elif page == "📈 Charts":
 elif page == "🧪 Backtest":
     from production.monitoring.pages import backtest
     backtest.render()
+elif page == "📋 Strategy":
+    from production.monitoring.pages import strategy
+    strategy.render()
 elif page == "⚙️ Config Editor":
     from production.monitoring.pages import config_editor
     config_editor.render()
-elif page == "📋 Logs":
+elif page == "🗒️ Logs":
     from production.monitoring.pages import logs
     logs.render()

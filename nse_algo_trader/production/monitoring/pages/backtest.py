@@ -23,10 +23,10 @@ def render():
     with st.form("backtest_form"):
         c1, c2, c3 = st.columns(3)
         with c1:
-            symbol = st.selectbox("Symbol", SYMBOLS, index=3)
+            symbol = st.selectbox("Symbol", SYMBOLS, index=1)  # default NIFTYBANK
         with c2:
             interval = st.selectbox("Timeframe", list(INTERVALS.keys()),
-                                    format_func=lambda x: INTERVALS[x], index=2)  # default 5 min
+                                    format_func=lambda x: INTERVALS[x], index=4)  # default 15 min
         with c3:
             capital = st.number_input("Capital (₹)", min_value=100_000,
                                        max_value=50_000_000, value=1_000_000, step=100_000)
