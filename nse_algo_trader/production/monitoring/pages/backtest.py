@@ -54,36 +54,18 @@ def render():
     # ── Run backtest ──────────────────────────────────────────────────────────
     with st.spinner(f"Running backtest on {symbol} {interval}min..."):
         try:
-            from production.strategy.backtest import (
-                load_ohlcv_and_features, _manual_backtest
-            )
-            from production.strategy.momentum import MomentumStrategy, load_config
-            import pyarrow.parquet as pq, yaml
-            from pathlib import Path
-            import numpy as np
+            from production.strategy.backtest import run_backtest, load_ohlcv_and_features
 
+            result = run_backtest(symbol=symbol, interval_min=interval,
+                                  capital=capital, verbose=False)
+
+            # Load signals_df and close for the equity curve plot
             ohlcv, feats = load_ohlcv_and_features(symbol, interval)
             common = feats.index.intersection(ohlcv.index)
-            feats = feats.loc[common]
+            from production.strategy.momentum import MomentumStrategy, load_config
+            signals_df = MomentumStrategy(load_config()).generate_signals_df(
+                feats.loc[common], ohlcv.loc[common, "close"])
             close = ohlcv.loc[common, "close"]
-
-            vix_series = None
-            try:
-                vpath = Path(f"data/ohlcv/NSE_INDIAVIX_INDEX_{interval}min.parquet")
-                if vpath.exists():
-                    vdf = pq.read_table(vpath).to_pandas()
-                    vdf.index = pd.to_datetime(vdf.index, utc=True).tz_convert("Asia/Kolkata")
-                    vix_series = vdf["close"].reindex(common)
-            except Exception:
-                pass
-
-            open_series = ohlcv.loc[common, "open"] if "open" in ohlcv.columns else None
-            signals_df = MomentumStrategy(load_config()).generate_signals_df(feats, close, vix=vix_series, open_=open_series)
-            costs_cfg = yaml.safe_load(Path("configs/broker.yaml").read_text()).get("transaction_costs", {})
-            fee = costs_cfg.get("exchange_fee_pct", 0.00345) / 100 + costs_cfg.get("slippage_pct", 0.02) / 100
-
-            result = _manual_backtest(signals_df, close, capital, fee, interval)
-            result.update({"symbol": symbol, "interval_min": interval})
 
             st.session_state.bt_result  = result
             st.session_state.bt_signals = signals_df
