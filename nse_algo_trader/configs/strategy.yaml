@@ -1,13 +1,27 @@
 primary_timeframe_min: 5     # primary strategy timeframe (minutes)
 timeframes_min: [1, 5, 15, 1440]
 
-signal_confidence_threshold: 0.6   # minimum alpha score to enter a trade
+signal_confidence_threshold: 0.55  # lowered from 0.60 — admit moderate-trend signals
 target_bars_ahead: 3               # prediction horizon for direction model
 
 # Regime thresholds
 regime:
-  adx_trending_threshold: 25       # ADX > 25 = trending
-  adx_ranging_threshold: 20        # ADX < 20 = ranging
+  adx_trending_threshold: 20       # lowered from 25 — more signals, better sample size
+  adx_ranging_threshold: 15        # ADX < 15 = ranging
+
+# Session window — skip opening noise and last 20 min
+session:
+  start: "09:45"
+  end: "15:10"
+
+# Entry quality filters
+entry:
+  min_confidence: 0.55          # minimum confidence to execute (was 0.60)
+  require_bar_confirmation: false
+  rsi_long_min: 45.0
+  rsi_long_max: 70.0
+  rsi_short_min: 30.0
+  rsi_short_max: 55.0
 
 # India VIX regime levels
 vix:

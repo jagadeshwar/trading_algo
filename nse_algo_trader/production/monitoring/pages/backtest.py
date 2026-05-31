@@ -11,7 +11,7 @@ SYMBOLS = [
     "NSE:TCS-EQ", "NSE:SBIN-EQ", "NSE:AXISBANK-EQ",
     "NSE:KOTAKBANK-EQ", "NSE:LT-EQ", "NSE:ITC-EQ",
 ]
-INTERVALS = {5: "5 min", 15: "15 min", 1440: "Daily"}
+INTERVALS = {1: "1 min", 3: "3 min", 5: "5 min", 10: "10 min", 15: "15 min", 30: "30 min"}
 TARGET_METRICS = {"Sharpe Ratio": 1.5, "Win Rate %": 52.0, "Profit Factor": 1.4, "Max DD %": 10.0}
 
 
@@ -26,7 +26,7 @@ def render():
             symbol = st.selectbox("Symbol", SYMBOLS, index=3)
         with c2:
             interval = st.selectbox("Timeframe", list(INTERVALS.keys()),
-                                    format_func=lambda x: INTERVALS[x], index=1)
+                                    format_func=lambda x: INTERVALS[x], index=2)  # default 5 min
         with c3:
             capital = st.number_input("Capital (₹)", min_value=100_000,
                                        max_value=50_000_000, value=1_000_000, step=100_000)
@@ -77,7 +77,8 @@ def render():
             except Exception:
                 pass
 
-            signals_df = MomentumStrategy(load_config()).generate_signals_df(feats, close, vix=vix_series)
+            open_series = ohlcv.loc[common, "open"] if "open" in ohlcv.columns else None
+            signals_df = MomentumStrategy(load_config()).generate_signals_df(feats, close, vix=vix_series, open_=open_series)
             costs_cfg = yaml.safe_load(Path("configs/broker.yaml").read_text()).get("transaction_costs", {})
             fee = costs_cfg.get("exchange_fee_pct", 0.00345) / 100 + costs_cfg.get("slippage_pct", 0.02) / 100
 
