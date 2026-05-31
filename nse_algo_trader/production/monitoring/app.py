@@ -94,7 +94,7 @@ _Click **Strategy P2** in the nav to configure._
     page = st.radio(
         "Navigate",
         ["📊 Dashboard", "🎮 Trading Controls", "📈 Charts", "🧪 Backtest",
-         "📋 Strategy P1", "🤖 Strategy P2", "⚙️ Config Editor", "🗒️ Logs"],
+         "📋 Strategy", "⚙️ Config Editor", "🗒️ Logs"],
         label_visibility="collapsed",
     )
     st.divider()
@@ -144,12 +144,14 @@ elif page == "📈 Charts":
 elif page == "🧪 Backtest":
     from production.monitoring.pages import backtest
     backtest.render()
-elif page == "📋 Strategy P1":
-    from production.monitoring.pages import strategy
-    strategy.render()
-elif page == "🤖 Strategy P2":
-    from production.monitoring.pages import strategy_phase2
-    strategy_phase2.render()
+elif page == "📋 Strategy":
+    tab1, tab2 = st.tabs(["📋 Phase 1 — Momentum", "🤖 Phase 2 — ML Enhanced"])
+    with tab1:
+        from production.monitoring.pages import strategy
+        strategy.render()
+    with tab2:
+        from production.monitoring.pages import strategy_phase2
+        strategy_phase2.render()
 elif page == "⚙️ Config Editor":
     from production.monitoring.pages import config_editor
     config_editor.render()
