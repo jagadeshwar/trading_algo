@@ -50,8 +50,9 @@ def run_backtest(
     interval_min: int = 5,
     capital: float = 500_000,
     verbose: bool = True,
+    no_vol_filter: bool = False,
 ) -> dict:
-    from production.strategy.momentum import MomentumStrategy, load_config
+    from production.strategy.momentum import MomentumStrategy, load_config, StrategyConfig
 
     logger.info("Loading data for {} {}min...", symbol, interval_min)
     ohlcv, feats = load_ohlcv_and_features(symbol, interval_min)
@@ -74,7 +75,11 @@ def run_backtest(
     except Exception:
         pass
 
-    strategy = MomentumStrategy(load_config())
+    cfg = load_config()
+    if no_vol_filter:
+        cfg.volume_filter_ratio = 0.0   # bypass for index data with no historical volume
+        logger.info("Volume filter disabled (--no-vol-filter)")
+    strategy = MomentumStrategy(cfg)
     logger.info("Generating signals on {} bars...", len(feats))
     open_series = ohlcv["open"] if "open" in ohlcv.columns else None
     signals_df = strategy.generate_signals_df(feats, close, vix=vix_series, open_=open_series)
@@ -316,13 +321,16 @@ def _print_report(result: dict, signals_df: pd.DataFrame, close: pd.Series) -> N
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--symbol",   default="NSE:NIFTY50-INDEX")
-    parser.add_argument("--interval", default=5, type=int)
-    parser.add_argument("--capital",  default=500_000, type=float)
+    parser.add_argument("--symbol",         default="NSE:NIFTY50-INDEX")
+    parser.add_argument("--interval",       default=5, type=int)
+    parser.add_argument("--capital",        default=500_000, type=float)
+    parser.add_argument("--no-vol-filter",  action="store_true",
+                        help="Disable volume filter (for cash index data without historical volume)")
     args = parser.parse_args()
 
     from dotenv import load_dotenv
     load_dotenv()
 
     run_backtest(symbol=args.symbol, interval_min=args.interval,
-                 capital=args.capital, verbose=True)
+                 capital=args.capital, verbose=True,
+                 no_vol_filter=args.no_vol_filter)

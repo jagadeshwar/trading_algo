@@ -73,6 +73,14 @@ class FeatureEngineer:
         self._volatility_features(d)
         self._volume_features(d)
         self._regime_features(d)
+        # Volume features are NaN when the data provider returns zero volume for
+        # index symbols (e.g. older Fyers history). Fill BEFORE the HMM call
+        # because vol_ratio is one of the HMM observation features — leaving it
+        # NaN causes the HMM to skip those bars and produce NaN regime labels.
+        for col in ["vol_ratio", "obv_norm", "vwap_dev", "vol_delta_ma"]:
+            if col in d.columns and d[col].isna().any():
+                fill = d[col].median() if d[col].notna().any() else (1.0 if col == "vol_ratio" else 0.0)
+                d[col] = d[col].fillna(fill)
         self._hmm_regime(d, hmm_model_path)
         self._target(d)
         keep = [c for c in FEATURE_NAMES if c in d.columns]
