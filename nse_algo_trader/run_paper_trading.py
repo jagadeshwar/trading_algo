@@ -249,6 +249,12 @@ def run_paper_session(
                 time.sleep(next_check)
                 continue
 
+            # Reset daily stats at the start of each new trading day
+            if not hasattr(trader, '_last_trade_date') or trader._last_trade_date != now.date():
+                trader.reset_daily()
+                trader._last_trade_date = now.date()
+                logger.info("Daily stats reset for {}", now.date())
+
             bar_count += 1
             logger.info("── Bar {} @ {} ──", bar_count, now.strftime("%H:%M"))
 
@@ -319,11 +325,11 @@ def run_paper_session(
                         )
 
             # ── Update open positions ──────────────────────────────────────────
-            exits = trader.update_positions(prices, features_map)
+            equity_before_exits = float(trader.equity)
+            exits = trader.update_positions(prices, features_map, bar_time=now)
             for exit_fill in exits:
-                capital_val = float(trader.capital)
-                pnl_pct = exit_fill.pnl / capital_val * 100 if capital_val else 0
-                _append_trade(exit_fill, "EXIT", capital=capital_val,
+                pnl_pct = exit_fill.pnl / equity_before_exits * 100 if equity_before_exits else 0
+                _append_trade(exit_fill, "EXIT", capital=equity_before_exits,
                               capital_after=float(trader.equity))
                 notifier.notify_exit(
                     symbol=exit_fill.symbol,
