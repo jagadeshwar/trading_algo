@@ -99,7 +99,8 @@ class WalkForwardValidator:
             return None
         ohlcv = pq.read_table(ohlcv_path).to_pandas()
         ohlcv.index = pd.to_datetime(ohlcv.index, utc=True).tz_convert("Asia/Kolkata")
-        feats = FeatureEngineer().compute(ohlcv)
+        hmm_path = str(Path("models/regime_hmm.pkl")) if Path("models/regime_hmm.pkl").exists() else None
+        feats = FeatureEngineer().compute(ohlcv, hmm_model_path=hmm_path)
         # Merge raw close price so walk-forward can simulate fills
         feats["close"] = ohlcv["close"].reindex(feats.index)
         return feats
@@ -179,10 +180,11 @@ class WalkForwardValidator:
                         "qty":       qty,
                     }
 
-            bar_returns.append((equity - self.capital) / self.capital)
+            bar_returns.append(equity)   # track running equity level (not fraction)
 
-        pnl_series = pd.Series(bar_returns).diff().dropna()
-        sharpe     = float(pnl_series.mean() / (pnl_series.std() + 1e-9) * np.sqrt(252 * 78))
+        equity_series = pd.Series(bar_returns)
+        bar_rets      = equity_series.pct_change().dropna()
+        sharpe        = float(bar_rets.mean() / (bar_rets.std() + 1e-9) * np.sqrt(252 * 78))
 
         wins   = [t for t in trades if t > 0]
         losses = [t for t in trades if t < 0]
@@ -195,13 +197,13 @@ class WalkForwardValidator:
             "profit_factor": pf,
             "pnl_pct":      (equity - self.capital) / self.capital * 100,
             "sharpe":       sharpe,
-            "bar_returns":  bar_returns,
+            "bar_returns":  bar_returns,    # equity levels, not fractions
         }
 
     def _aggregate(self, symbol: str, window_stats: list[dict], all_rets: list[float]) -> WFVResult:
         from production.models.purged_cv import deflated_sharpe_ratio
 
-        rets      = pd.Series(all_rets).diff().dropna()
+        rets      = pd.Series(all_rets).pct_change().dropna()  # equity levels → pct returns
         sharpe    = float(rets.mean() / (rets.std() + 1e-9) * np.sqrt(252 * 78))
         skew      = float(rets.skew())
         kurt      = float(rets.kurtosis())
@@ -216,8 +218,8 @@ class WalkForwardValidator:
         avg_pf        = np.mean([w["profit_factor"] for w in window_stats if w["n_trades"] > 0])
         total_pnl_pct = sum(w["pnl_pct"] for w in window_stats)
 
-        # Max drawdown from equity curve (convert fractional rets to equity)
-        equity_curve = pd.Series(all_rets) * self.capital + self.capital
+        # Max drawdown — all_rets are equity levels now
+        equity_curve = pd.Series(all_rets)
         roll_max     = equity_curve.cummax()
         drawdown     = (equity_curve - roll_max) / roll_max * 100
         max_dd       = float(drawdown.min())

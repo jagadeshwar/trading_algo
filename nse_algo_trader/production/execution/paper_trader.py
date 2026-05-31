@@ -203,6 +203,7 @@ class PaperTrader:
         self,
         current_prices: dict[str, float],
         latest_features: dict[str, pd.Series] | None = None,
+        bar_time: "pd.Timestamp | None" = None,
     ) -> list[Fill]:
         """Check each open position for stop/target/reversal. Returns any exit fills."""
         self.circuit.record_tick()
@@ -214,7 +215,7 @@ class PaperTrader:
             if price is None:
                 continue
 
-            exit_now, reason = self._check_exit(pos, price, latest_features)
+            exit_now, reason = self._check_exit(pos, price, latest_features, bar_time)
             if exit_now:
                 fill = self._close_position(symbol, price, reason)
                 if fill:
@@ -282,13 +283,19 @@ class PaperTrader:
     # ── Internals ─────────────────────────────────────────────────────────────
 
     def _check_exit(
-        self, pos: Position, price: float, features: dict | None
+        self, pos: Position, price: float, features: dict | None,
+        bar_time: "pd.Timestamp | None" = None,
     ) -> tuple[bool, str]:
-        from datetime import datetime
-        from zoneinfo import ZoneInfo
-        now_ist = datetime.now(ZoneInfo("Asia/Kolkata")).time()
         from datetime import time as dtime
-        if now_ist >= dtime(15, 25):
+        from zoneinfo import ZoneInfo
+        IST = ZoneInfo("Asia/Kolkata")
+        # Use bar timestamp for EOD check (safe for backtests); fall back to wall clock
+        if bar_time is not None:
+            check_time = bar_time.astimezone(IST).time()
+        else:
+            from datetime import datetime
+            check_time = datetime.now(IST).time()
+        if check_time >= dtime(15, 25):
             return True, f"EOD_EXIT 15:25 forced close price={price:.2f}"
 
         if pos.direction == 1:

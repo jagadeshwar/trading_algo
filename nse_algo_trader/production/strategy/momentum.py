@@ -228,17 +228,22 @@ class MomentumStrategy:
         # ── XGBoost confidence boost (Phase 2) ────────────────────────────────
         xgb_model_path = Path("models/xgb_direction.pkl")
         if xgb_model_path.exists():
-            try:
-                from production.models.xgb_classifier import DirectionClassifier
-                if not hasattr(self, "_xgb_clf") or self._xgb_clf is None:
-                    self._xgb_clf = DirectionClassifier().load(xgb_model_path)
-                xgb_pred = self._xgb_clf.predict_bar(f)
-                if xgb_pred["direction"] == direction:
-                    confidence += xgb_pred["confidence"] * 0.15  # boost if aligned
-                elif xgb_pred["direction"] == -direction:
-                    confidence -= 0.10                            # penalise if opposed
-            except Exception:
-                pass
+            # _xgb_clf: None = unloaded, False = failed (skip retries), object = loaded
+            if not hasattr(self, "_xgb_clf"):
+                self._xgb_clf = None
+            if self._xgb_clf is not False:
+                try:
+                    if self._xgb_clf is None:
+                        from production.models.xgb_classifier import DirectionClassifier
+                        self._xgb_clf = DirectionClassifier().load(xgb_model_path)
+                    xgb_pred = self._xgb_clf.predict_bar(f)
+                    if xgb_pred["direction"] == direction:
+                        confidence += xgb_pred["confidence"] * 0.15
+                    elif xgb_pred["direction"] == -direction:
+                        confidence -= 0.10
+                except Exception as e:
+                    logger.warning("XGB boost failed, disabling for session: {}", e)
+                    self._xgb_clf = False   # stop retrying this session
 
         confidence = min(1.0, max(0.0, confidence))
 

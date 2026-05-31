@@ -163,7 +163,8 @@ class NewsSentiment:
                 logger.debug("Feed {} failed: {}", feed_url, e)
 
         if not headlines:
-            logger.debug("News sentiment: no headlines fetched")
+            logger.debug("News sentiment: no headlines fetched — backing off {}s", CACHE_TTL_S)
+            self._cache_time = time.time()   # back off — don't hammer feeds every call
             return
 
         scores: dict[str, list[float]] = {}
