@@ -270,7 +270,8 @@ def render():
     if running:
         syms = ", ".join(s.replace("NSE:", "").replace("-EQ", "").replace("-INDEX", "")
                          for s in state.get("symbols", []))
-        st.success(f"🟢  **PAPER TRADING ACTIVE** — {syms} · {state.get('interval')}min · last update {state.get('last_update', '—')}")
+        iv   = state.get("interval", 5)
+        st.success(f"🟢  **PAPER TRADING ACTIVE** — {syms}  ·  {iv}-min bars  ·  last bar {state.get('last_update', '—')}")
     elif state.get("circuit_broken"):
         st.error(f"🔴  **CIRCUIT BREAKER TRIPPED** — {state.get('circuit_reason', '')} — manual reset required")
     else:
@@ -289,31 +290,49 @@ def render():
                 symbols = st.multiselect(
                     "Symbols to trade",
                     options=[
+                        "NSE:NIFTY50-INDEX", "NSE:NIFTYBANK-INDEX",
                         "NSE:HDFCBANK-EQ", "NSE:ICICIBANK-EQ", "NSE:RELIANCE-EQ",
                         "NSE:TCS-EQ", "NSE:SBIN-EQ", "NSE:AXISBANK-EQ",
                         "NSE:INFY-EQ", "NSE:KOTAKBANK-EQ", "NSE:LT-EQ",
-                        "NSE:NIFTY50-INDEX", "NSE:NIFTYBANK-INDEX",
                     ],
-                    default=state.get("symbols") or ["NSE:HDFCBANK-EQ", "NSE:ICICIBANK-EQ", "NSE:RELIANCE-EQ"],
+                    default=state.get("symbols") or ["NSE:NIFTY50-INDEX", "NSE:NIFTYBANK-INDEX"],
                 )
-                interval = st.select_slider(
-                    "Bar interval",
-                    options=[5, 15],
-                    value=state.get("interval", 15),
-                    format_func=lambda x: f"{x} min",
+
+                # ── Bar Interval Selector ──────────────────────────────────────
+                st.markdown("**Bar Interval**")
+                _INTERVAL_OPTIONS = {
+                    "1 min  — 375 bars/day  · Scalping (high noise)":       1,
+                    "3 min  — 125 bars/day  · Fast momentum":               3,
+                    "5 min  — 75 bars/day   · Intraday momentum ✅ Recommended": 5,
+                    "10 min — 38 bars/day   · Balanced intraday":           10,
+                    "15 min — 25 bars/day   · Swing intraday":              15,
+                    "30 min — 13 bars/day   · Positional intraday":         30,
+                }
+                _saved_interval = state.get("interval", 5)
+                _default_label  = next(
+                    (lbl for lbl, v in _INTERVAL_OPTIONS.items() if v == _saved_interval),
+                    list(_INTERVAL_OPTIONS.keys())[2],   # default to 5 min
                 )
+                _selected_label = st.radio(
+                    "bar_interval_radio",
+                    options=list(_INTERVAL_OPTIONS.keys()),
+                    index=list(_INTERVAL_OPTIONS.keys()).index(_default_label),
+                    label_visibility="collapsed",
+                )
+                interval = _INTERVAL_OPTIONS[_selected_label]
 
             with col_right:
                 capital = st.number_input(
                     "Paper capital (₹)",
                     min_value=100_000, max_value=50_000_000,
-                    value=int(state.get("capital", 1_000_000)),
+                    value=int(state.get("capital", 500_000)),
                     step=100_000,
                     format="%d",
                 )
                 st.caption(f"Max position : ₹{capital * 0.10:,.0f}")
                 st.caption(f"Daily stop   : ₹{capital * 0.02:,.0f}  (–2%)")
                 st.caption(f"DD pause     : ₹{capital * 0.05:,.0f}  (–5%)")
+                st.caption(f"Polls every  : **{interval} min** · {6 * 60 // interval} polls/day")
 
             if not market_open:
                 st.info(f"⏰  Market is {'closed — opens 09:15 IST' if now.hour < 9 or (now.hour == 9 and now.minute < 15) else 'closed for today'}. "
@@ -359,7 +378,9 @@ def render():
         with col_info:
             syms = " · ".join(s.replace("NSE:", "").replace("-EQ", "").replace("-INDEX", "")
                               for s in state.get("symbols", []))
-            st.info(f"Trading: **{syms}** on **{state.get('interval')}min** bars")
+            iv = state.get('interval', 5)
+            bars_day = 6 * 60 // iv
+            st.info(f"Trading **{syms}** · **{iv}-min bars** · {bars_day} bars/day · polls every {iv} min")
 
     st.divider()
 
