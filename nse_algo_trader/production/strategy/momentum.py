@@ -20,21 +20,7 @@ import pandas as pd
 import yaml
 from loguru import logger
 
-
-@dataclass
-class Signal:
-    time: pd.Timestamp
-    symbol: str
-    direction: Literal[1, -1, 0]   # 1=Long, -1=Short, 0=Flat
-    confidence: float               # 0–1
-    entry_price: float
-    stop_price: float
-    target_price: float
-    atr: float
-    adx: float
-    vix: float | None
-    regime: str
-    reason: str                     # human-readable why signal fired
+from production.strategy.base import Signal  # shared Signal dataclass
 
 
 @dataclass
@@ -42,11 +28,19 @@ class StrategyConfig:
     fast_ema: int = 9
     slow_ema: int = 21
     volume_filter_ratio: float = 1.2
-    adx_trending_threshold: float = 25.0
+    adx_trending_threshold: float = 20.0   # was 25 — more signals on moderate trends
     stop_atr_multiplier: float = 2.0
     target_atr_multiplier: float = 3.0
     vix_max: float = 25.0
     vix_elevated: float = 20.0
+    session_start: str = "09:45"   # skip opening noise
+    session_end: str = "15:10"     # no new entries in final 20 min
+    min_confidence: float = 0.55           # was 0.60
+    require_bar_confirmation: bool = False # EMA crossovers often land on neutral bars
+    rsi_long_min: float = 45.0             # RSI floor for longs
+    rsi_long_max: float = 70.0             # RSI ceiling for longs (avoid overbought)
+    rsi_short_min: float = 30.0            # RSI floor for shorts
+    rsi_short_max: float = 55.0            # RSI ceiling for shorts (avoid oversold)
 
 
 def load_config(path: str = "configs/strategy.yaml") -> StrategyConfig:
@@ -55,15 +49,25 @@ def load_config(path: str = "configs/strategy.yaml") -> StrategyConfig:
         m = raw.get("momentum", {})
         r = raw.get("regime", {})
         v = raw.get("vix", {})
+        s = raw.get("session", {})
+        e = raw.get("entry", {})
         return StrategyConfig(
             fast_ema=m.get("fast_ema", 9),
             slow_ema=m.get("slow_ema", 21),
             volume_filter_ratio=m.get("volume_filter_ratio", 1.2),
-            adx_trending_threshold=r.get("adx_trending_threshold", 25.0),
+            adx_trending_threshold=r.get("adx_trending_threshold", 20.0),
             stop_atr_multiplier=m.get("stop_atr_multiplier", 2.0),
             target_atr_multiplier=m.get("target_atr_multiplier", 3.0),
             vix_max=v.get("high", 25.0),
             vix_elevated=v.get("elevated", 20.0),
+            session_start=s.get("start", "09:45"),
+            session_end=s.get("end", "15:10"),
+            min_confidence=e.get("min_confidence", 0.55),
+            require_bar_confirmation=e.get("require_bar_confirmation", False),
+            rsi_long_min=e.get("rsi_long_min", 45.0),
+            rsi_long_max=e.get("rsi_long_max", 70.0),
+            rsi_short_min=e.get("rsi_short_min", 30.0),
+            rsi_short_max=e.get("rsi_short_max", 55.0),
         )
     except Exception as e:
         logger.warning("Could not load strategy config ({}), using defaults", e)
@@ -83,6 +87,7 @@ class MomentumStrategy:
         features: pd.DataFrame,
         close: pd.Series,
         vix: pd.Series | None = None,
+        open_: pd.Series | None = None,
     ) -> pd.DataFrame:
         """Return a DataFrame with columns: direction, confidence, stop, target, atr.
 
@@ -91,9 +96,11 @@ class MomentumStrategy:
         features : pre-computed feature DataFrame (output of FeatureEngineer)
         close    : raw close price series aligned to features index
         vix      : India VIX series (optional; disables VIX gate if None)
+        open_    : raw open price series (optional; used for bar confirmation filter)
         """
         f = features.copy()
         close = close.reindex(f.index)
+        open_s = open_.reindex(f.index) if open_ is not None else None
 
         # ── Absolute ATR ──────────────────────────────────────────────────────
         atr = f["atr_pct"] * close  # atr_pct = ATR/close → ATR = atr_pct × close
@@ -112,9 +119,28 @@ class MomentumStrategy:
         else:
             vix_ok = pd.Series(True, index=f.index)
 
-        # ── Raw entries ───────────────────────────────────────────────────────
-        long_entry  = cross_long  & vol_ok & trending & di_long  & vix_ok
-        short_entry = cross_short & vol_ok & trending & di_short & vix_ok
+        # ── Session time filter: skip opening noise and last 20 min ──────────
+        import datetime as _dt
+        _s_start = _dt.time(*[int(x) for x in self.cfg.session_start.split(":")])
+        _s_end   = _dt.time(*[int(x) for x in self.cfg.session_end.split(":")])
+        if hasattr(f.index, "time"):
+            _times = f.index.time
+            session_ok = pd.Series(
+                [_s_start <= t < _s_end for t in _times],
+                index=f.index,
+            )
+        else:
+            session_ok = pd.Series(True, index=f.index)
+
+        # ── RSI quality filter: avoid entering at overbought/oversold extremes ──
+        rsi = f.get("rsi", pd.Series(50.0, index=f.index))
+        rsi_long_ok  = (rsi >= self.cfg.rsi_long_min)  & (rsi <= self.cfg.rsi_long_max)
+        rsi_short_ok = (rsi >= self.cfg.rsi_short_min) & (rsi <= self.cfg.rsi_short_max)
+
+        # ── Raw entries — crossover only (strong_trend continuation path
+        #    disabled: enters at trend exhaustion, reverses to stop) ──────────
+        long_entry  = cross_long  & vol_ok & trending & di_long  & vix_ok & session_ok & rsi_long_ok
+        short_entry = cross_short & vol_ok & trending & di_short & vix_ok & session_ok & rsi_short_ok
 
         direction = pd.Series(0, index=f.index, dtype=int)
         direction[long_entry]  =  1
@@ -122,6 +148,7 @@ class MomentumStrategy:
 
         # ── Confidence score ──────────────────────────────────────────────────
         confidence = pd.Series(0.50, index=f.index)
+        confidence += np.where((f["adx"] >= 20) & (f["adx"] <= 25), 0.05, 0.0)  # moderate trend
         confidence += np.where(f["adx"] > 25,  0.10, 0.0)
         confidence += np.where(f["adx"] > 35,  0.05, 0.0)
         confidence += np.where(f["vol_ratio"] > 1.5, 0.10, 0.0)
@@ -163,6 +190,7 @@ class MomentumStrategy:
         latest_features: pd.Series,
         close: float,
         vix: float | None = None,
+        open_price: float | None = None,
     ) -> Signal | None:
         """Evaluate a single bar. Returns Signal if entry condition met, else None."""
         f = latest_features
@@ -179,11 +207,13 @@ class MomentumStrategy:
         dist21      = f.get("dist_ema_21", 0.0)
         di_diff     = f.get("di_diff", 0.0)
 
-        # Trend continuation: strong ADX + price on correct side of EMA21
-        strong_trend_long  = adx >= 40 and dist21 > 0.001 and di_diff > 15
-        strong_trend_short = adx >= 40 and dist21 < -0.001 and di_diff < -15
-
-        vol_ok_relaxed = f.get("vol_ratio", 0.0) >= 0.9  # relaxed for continuation
+        # Session time filter
+        import datetime as _dt
+        _now = pd.Timestamp.now(tz="Asia/Kolkata").time()
+        _s_start = _dt.time(*[int(x) for x in self.cfg.session_start.split(":")])
+        _s_end   = _dt.time(*[int(x) for x in self.cfg.session_end.split(":")])
+        if not (_s_start <= _now < _s_end):
+            return None
 
         if not (vix_ok and trending):
             return None
@@ -196,15 +226,16 @@ class MomentumStrategy:
         elif vol_ok and cross_short and di_short:
             direction = -1
             reason = f"EMA9 crossed below EMA21 | ADX={adx:.1f} | vol_ratio={f.get('vol_ratio',0):.2f}"
-        elif vol_ok_relaxed and strong_trend_long:
-            direction = 1
-            reason = f"Strong trend continuation LONG | ADX={adx:.1f} | dist_ema21={dist21:.4f}"
-        elif vol_ok_relaxed and strong_trend_short:
-            direction = -1
-            reason = f"Strong trend continuation SHORT | ADX={adx:.1f} | dist_ema21={dist21:.4f}"
-
         if direction == 0:
             return None
+
+        # ── RSI quality filter: avoid entering at overbought/oversold extremes ──
+        rsi_val = f.get("rsi", 50.0)
+        if direction == 1 and not (self.cfg.rsi_long_min <= rsi_val <= self.cfg.rsi_long_max):
+            return None
+        if direction == -1 and not (self.cfg.rsi_short_min <= rsi_val <= self.cfg.rsi_short_max):
+            return None
+
 
         # ── News sentiment filter (Phase 2) ───────────────────────────────────
         try:
@@ -218,6 +249,7 @@ class MomentumStrategy:
             pass  # never block on sentiment fetch failure
 
         confidence = 0.50
+        if 20 <= f.get("adx", 0) <= 25: confidence += 0.05  # moderate trend boost
         if f.get("adx", 0) > 25:  confidence += 0.10
         if f.get("adx", 0) > 35:  confidence += 0.05
         if f.get("vol_ratio", 0) > 1.5: confidence += 0.10
@@ -267,10 +299,11 @@ class MomentumStrategy:
             stop_price=stop,
             target_price=target,
             atr=atr,
+            strategy="momentum",
+            reason=reason,
             adx=f.get("adx", 0.0),
             vix=vix,
             regime=regime,
-            reason=reason,
         )
 
     # ── Position management helpers ───────────────────────────────────────────
