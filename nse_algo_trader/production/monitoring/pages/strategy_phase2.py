@@ -191,9 +191,9 @@ def render() -> None:
 
     cfg = _load_cfg()
 
-    tab_ov, tab_dir, tab_opt, tab_ml, tab_req = st.tabs([
+    tab_ov, tab_dir, tab_opt, tab_chain, tab_ml, tab_req = st.tabs([
         "📊 Overview", "🎯 Directional Strategies", "📈 Options Strategies",
-        "🤖 ML Models", "💬 Requests",
+        "🔴 Live Chain", "🤖 ML Models", "💬 Requests",
     ])
 
     # ══ TAB 1: Overview ══════════════════════════════════════════════════════
@@ -595,7 +595,251 @@ Confidence scoring formula (base 0.50 + boosts):
                     else:
                         st.caption("_Edit parameters directly in configs/strategy.yaml_")
 
-    # ══ TAB 4: ML Models ══════════════════════════════════════════════════════
+    # ══ TAB 4: Live Option Chain ══════════════════════════════════════════════
+    with tab_chain:
+        st.subheader("🔴 Live Option Chain + Market Context")
+        st.caption(
+            "Data source: NSE India (primary) → Fyers API (fallback) · "
+            "Greeks computed via Black-Scholes · Strike intervals: Nifty=50pt · BankNifty=100pt"
+        )
+
+        # ── Symbol + expiry selector ───────────────────────────────────────────
+        lc1, lc2, lc3, lc4 = st.columns(4)
+        with lc1:
+            chain_sym = st.selectbox(
+                "Symbol",
+                ["NSE:NIFTY50-INDEX", "NSE:NIFTYBANK-INDEX", "NSE:FINNIFTY-INDEX"],
+                key="chain_sym",
+            )
+        with lc2:
+            expiry_idx = st.number_input("Expiry (0=nearest)", 0, 5, 0, key="chain_exp")
+        with lc3:
+            strike_cnt = st.number_input("Strikes around ATM", 5, 40, 20, key="chain_strikes")
+        with lc4:
+            exec_mode  = st.selectbox("Execution mode", ["paper", "live"], key="chain_mode")
+
+        fetch_col, _ = st.columns([1, 3])
+        with fetch_col:
+            do_fetch = st.button("🔄 Fetch Live Chain", type="primary", key="do_fetch")
+
+        if do_fetch:
+            with st.spinner("Fetching option chain from NSE…"):
+                try:
+                    from production.data.option_chain import OptionChainFetcher
+                    from production.strategy.options_executor import OptionsExecutor
+
+                    # Try to get Fyers client from session state
+                    fyers_client = st.session_state.get("fyers_client", None)
+                    fetcher  = OptionChainFetcher(fyers_client=fyers_client)
+                    chain    = fetcher.fetch(chain_sym, int(expiry_idx), int(strike_cnt), force_refresh=True)
+                    executor = OptionsExecutor(fyers_client=fyers_client)
+
+                    # Cache in session state
+                    st.session_state["live_chain"]    = chain
+                    st.session_state["live_executor"] = executor
+                    st.session_state["live_fetcher"]  = fetcher
+                    st.success(f"✅ Chain fetched from **{chain.source.upper()}** — {len(chain.quotes)//2} strikes · expiry {chain.expiry}")
+
+                except Exception as ex:
+                    st.error(f"Fetch failed: {ex}")
+                    st.info("If NSE is blocked, connect your Fyers session first (Dashboard → Connect Fyers), then retry.")
+
+        chain = st.session_state.get("live_chain", None)
+
+        if chain is not None:
+            # ── Market summary ─────────────────────────────────────────────────
+            st.divider()
+            st.subheader("📊 Market Context")
+
+            m1, m2, m3, m4, m5, m6 = st.columns(6)
+            vix_color = "🔴" if chain.vix > 20 else ("🟡" if chain.vix > 15 else "🟢")
+            m1.metric("Underlying",  f"₹{chain.underlying:,.0f}")
+            m2.metric("ATM IV",      f"{chain.atm_iv:.1f}%")
+            m3.metric(f"VIX {vix_color}", f"{chain.vix:.2f}" if chain.vix else "—")
+            m4.metric("PCR (OI)",    f"{chain.pcr:.2f}")
+            m5.metric("Max Pain",    f"₹{chain.max_pain:,.0f}")
+            m6.metric("EM ±1 SD",    f"±{chain.em_1sd:.0f} pts")
+
+            # VIX expected move table
+            import math as _m
+            vix_v = chain.vix or chain.atm_iv
+            if vix_v:
+                st.markdown(f"""
+**India VIX implied expected moves for {chain_sym.split(':')[1]}** (underlying ≈ ₹{chain.underlying:,.0f})
+
+| Horizon | Expected Move | Range |
+|---------|---------------|-------|
+| Daily   | ±{chain.underlying*(vix_v/100)*_m.sqrt(1/365):.0f} pts | {chain.underlying-(chain.underlying*(vix_v/100)*_m.sqrt(1/365)):.0f} – {chain.underlying+(chain.underlying*(vix_v/100)*_m.sqrt(1/365)):.0f} |
+| Weekly (7d) | ±{chain.em_1sd:.0f} pts | {chain.underlying-chain.em_1sd:.0f} – {chain.underlying+chain.em_1sd:.0f} |
+| Monthly (30d) | ±{chain.underlying*(vix_v/100)*_m.sqrt(30/365):.0f} pts | {chain.underlying-(chain.underlying*(vix_v/100)*_m.sqrt(30/365)):.0f} – {chain.underlying+(chain.underlying*(vix_v/100)*_m.sqrt(30/365)):.0f} |
+                """)
+
+            # ── Nifty50 market context ─────────────────────────────────────────
+            fyers_client = st.session_state.get("fyers_client", None)
+            if fyers_client and st.button("🌍 Load Nifty50 Market Context", key="load_ctx"):
+                with st.spinner("Fetching all Nifty50 quotes…"):
+                    try:
+                        fetcher_ctx = st.session_state.get("live_fetcher")
+                        ctx = fetcher_ctx.fetch_market_context(vix_value=chain.vix or 0)
+                        if ctx:
+                            st.session_state["market_ctx"] = ctx
+                    except Exception as ex:
+                        st.warning(f"Market context: {ex}")
+
+            ctx = st.session_state.get("market_ctx", None)
+            if ctx:
+                st.subheader("🏦 Index Performance")
+                ci1, ci2, ci3, ci4 = st.columns(4)
+                ci1.metric("Nifty50",     f"₹{ctx.nifty_last:,.0f}",      f"{ctx.nifty_change_pct:+.2f}%")
+                ci2.metric("BankNifty",   f"₹{ctx.banknifty_last:,.0f}",  f"{ctx.banknifty_change_pct:+.2f}%")
+                ci3.metric("Bank vs Nifty", f"{ctx.banknifty_vs_nifty:+.2f}%",
+                           "Banking outperforming" if ctx.banknifty_vs_nifty > 0 else "Banking underperforming")
+                ci4.metric("India VIX",   f"{ctx.india_vix:.2f}")
+
+                col_g, col_l = st.columns(2)
+                with col_g:
+                    st.markdown("**🟢 Top 5 Nifty50 Gainers**")
+                    gdf = pd.DataFrame(ctx.top_gainers)[["symbol", "ltp", "change_pct", "rs_vs_nifty"]]
+                    gdf.columns = ["Symbol", "LTP", "Change %", "RS vs Nifty"]
+                    st.dataframe(gdf, hide_index=True, use_container_width=True)
+                with col_l:
+                    st.markdown("**🔴 Top 5 Nifty50 Losers**")
+                    ldf = pd.DataFrame(ctx.top_losers)[["symbol", "ltp", "change_pct", "rs_vs_nifty"]]
+                    ldf.columns = ["Symbol", "LTP", "Change %", "RS vs Nifty"]
+                    st.dataframe(ldf, hide_index=True, use_container_width=True)
+
+                # Full Nifty50 heatmap-style table
+                with st.expander("📋 All Nifty50 Stocks — RS vs Nifty", expanded=False):
+                    all_rows = [
+                        {"Symbol": k.split(":")[1], "LTP": v["ltp"],
+                         "Change %": v["change_pct"], "RS vs Nifty": v["rs_vs_nifty"]}
+                        for k, v in ctx.nifty50_quotes.items() if v["ltp"] > 0
+                    ]
+                    adf = pd.DataFrame(all_rows).sort_values("RS vs Nifty", ascending=False)
+                    st.dataframe(adf, hide_index=True, use_container_width=True)
+
+            # ── Live option chain table ────────────────────────────────────────
+            st.divider()
+            st.subheader("📋 Option Chain")
+
+            chain_df = chain.to_df()
+            if not chain_df.empty:
+                # Highlight ATM row
+                atm = chain.atm_strike
+                def _highlight_atm(row):
+                    return ["background-color: #fff3cd" if row["strike"] == atm else "" for _ in row]
+
+                display_cols = [c for c in chain_df.columns if any(
+                    k in c for k in ["strike", "CE_ltp", "CE_iv", "CE_oi", "CE_delta",
+                                      "CE_theta", "PE_ltp", "PE_iv", "PE_oi", "PE_delta", "PE_theta"]
+                )]
+                display_df = chain_df[display_cols].copy()
+                display_df.columns = [c.replace("CE_", "CE ").replace("PE_", "PE ") for c in display_df.columns]
+
+                st.dataframe(
+                    display_df.style.apply(_highlight_atm, axis=1),
+                    use_container_width=True, hide_index=True,
+                )
+                st.caption(f"⭐ Highlighted row = ATM strike ({atm:.0f}) · Source: {chain.source.upper()} · {chain.timestamp.strftime('%H:%M:%S IST')}")
+            else:
+                st.warning("Chain data empty — try a different symbol or expiry.")
+
+            # ── Strategy signals with real premiums ───────────────────────────
+            st.divider()
+            st.subheader("🎯 Active Strategy Signals → Real Premiums")
+            st.caption("Strategies are evaluated against the current chain. Click Execute to place paper/live orders.")
+
+            # Build feature row from chain for signal evaluation
+            import pandas as _pd
+            f_proxy = _pd.Series({
+                "adx": 15.0, "rsi": 50.0, "di_diff": 0.0, "vol_ratio": 1.0,
+                "dist_ema_21": 0.0, "dist_ema_50": 0.0, "dist_ema_200": 0.0,
+                "bb_pct_b": 0.5, "bb_squeeze": 0, "macd_hist_norm": 0.0, "atr_pct": 0.003,
+            })
+            st.info(
+                "⚠️ Signal conditions below use placeholder feature values (ADX=15, RSI=50). "
+                "In live trading, real bar features from the data feed are used. "
+                "Use this panel to preview strike selection and premiums for any strategy."
+            )
+
+            from production.strategy.options_strategies import ALL_OPTIONS_STRATEGIES
+            executor = st.session_state.get("live_executor", OptionsExecutor())
+
+            for strat in ALL_OPTIONS_STRATEGIES:
+                try:
+                    sig = strat.evaluate_bar(chain_sym, f_proxy, chain.underlying, vix=chain.vix or chain.atm_iv)
+                    if sig is None or not sig.condition_met:
+                        continue
+                    legs = executor.resolve_legs(sig, chain)
+                    if not legs:
+                        continue
+                    payoff = executor.compute_payoff(legs, chain.underlying)
+
+                    cat_icon = {"bullish": "📈", "bearish": "📉", "neutral": "⚖️"}.get(sig.category, "")
+                    with st.expander(
+                        f"{cat_icon} **{sig.strategy.replace('_',' ').title()}** — "
+                        f"Net {'Credit' if payoff.net_premium > 0 else 'Debit'} "
+                        f"₹{abs(payoff.net_premium):,.0f}  |  "
+                        f"Max Profit ₹{payoff.max_profit:,.0f}  |  "
+                        f"Max Loss ₹{payoff.max_loss:,.0f}",
+                        expanded=False,
+                    ):
+                        # Leg table
+                        leg_rows = [{
+                            "Action":   l.action.upper(),
+                            "Type":     l.option_type.upper(),
+                            "Strike":   f"₹{l.actual_strike:,.0f}",
+                            "Fyers Symbol": l.fyers_symbol,
+                            "LTP":      f"₹{l.ltp:.2f}",
+                            "Bid/Ask":  f"₹{l.bid:.2f} / ₹{l.ask:.2f}",
+                            "IV":       f"{l.iv:.1f}%",
+                            "Delta":    f"{l.delta:+.3f}",
+                            "Theta":    f"{l.theta:.2f}/day",
+                            "OI":       f"{l.oi:,}",
+                            "Qty (lots)": l.qty,
+                        } for l in legs]
+                        st.dataframe(pd.DataFrame(leg_rows), hide_index=True, use_container_width=True)
+
+                        # Risk profile
+                        r1, r2, r3, r4 = st.columns(4)
+                        r1.metric("Net Premium", f"₹{payoff.net_premium:+,.0f}")
+                        r2.metric("Max Profit",  f"₹{payoff.max_profit:,.0f}")
+                        r3.metric("Max Loss",    f"₹{payoff.max_loss:,.0f}")
+                        r4.metric("BEP", f"{payoff.break_even_dn:.0f} – {payoff.break_even_up:.0f}")
+
+                        # Execute button
+                        if st.button(
+                            f"{'🧾 Paper' if exec_mode == 'paper' else '⚡ LIVE'} Execute — {sig.strategy}",
+                            key=f"exec_{sig.strategy}",
+                            type="primary" if exec_mode == "live" else "secondary",
+                        ):
+                            if exec_mode == "live":
+                                st.error("⚠️ Live execution requires Fyers session + SEBI compliance review. Switching to paper.")
+                                exec_mode = "paper"
+                            results = executor.place_paper(legs, sig, payoff)
+                            for r in results:
+                                st.success(f"✅ {r.message}")
+
+                except Exception as ex:
+                    pass  # strategy condition not met or chain data issue
+
+            # ── Paper positions ────────────────────────────────────────────────
+            st.divider()
+            st.subheader("📁 Open Paper Option Positions")
+            try:
+                executor_p = st.session_state.get("live_executor", OptionsExecutor())
+                pos_df = executor_p.open_positions()
+                if pos_df.empty:
+                    st.info("No open paper positions.")
+                else:
+                    disp_cols = [c for c in ["time", "strategy", "action", "option_type",
+                                              "actual_strike", "fyers_symbol", "price", "iv",
+                                              "net_premium", "max_profit", "max_loss"] if c in pos_df.columns]
+                    st.dataframe(pos_df[disp_cols], hide_index=True, use_container_width=True)
+            except Exception:
+                st.info("No positions loaded.")
+
+    # ══ TAB 5: ML Models ══════════════════════════════════════════════════════
     with tab_ml:
         st.subheader("ML Model Status")
         col1, col2 = st.columns(2)
@@ -650,7 +894,7 @@ Confidence scoring formula (base 0.50 + boosts):
             except Exception as ex:
                 st.error(f"Save failed: {ex}")
 
-    # ══ TAB 5: Requests ═══════════════════════════════════════════════════════
+    # ══ TAB 6: Requests ═══════════════════════════════════════════════════════
     with tab_req:
         st.subheader("💬 Request a Phase 2.1 Change")
         st.caption("Describe what you'd like changed. Claude Code reads this and implements it.")
