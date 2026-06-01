@@ -46,6 +46,8 @@ class RegimeDetector:
         self.random_state = random_state
         self._model: GaussianHMM | None = None
         self._state_map: dict[int, str] = {}   # HMM state idx → regime name
+        self._obs_mean: np.ndarray | None = None  # training mean for standardisation
+        self._obs_std:  np.ndarray | None = None  # training std  for standardisation
         self._fitted = False
 
     # ── Public API ─────────────────────────────────────────────────────────────
@@ -60,6 +62,9 @@ class RegimeDetector:
             n_iter=self.n_iter,
             random_state=self.random_state,
         )
+        # Store training statistics so inference uses the same scale
+        self._obs_mean = obs.mean(axis=0)
+        self._obs_std  = obs.std(axis=0)
         self._model.fit(obs, lengths)
         self._label_states()
         self._fitted = True
@@ -88,15 +93,22 @@ class RegimeDetector:
     def save(self, path: str | Path) -> None:
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         with open(path, "wb") as f:
-            pickle.dump({"model": self._model, "state_map": self._state_map}, f)
+            pickle.dump({
+                "model":     self._model,
+                "state_map": self._state_map,
+                "obs_mean":  self._obs_mean,
+                "obs_std":   self._obs_std,
+            }, f)
         logger.info("HMM saved → {}", path)
 
     def load(self, path: str | Path) -> "RegimeDetector":
         with open(path, "rb") as f:
             data = pickle.load(f)
-        self._model    = data["model"]
+        self._model     = data["model"]
         self._state_map = data["state_map"]
-        self._fitted   = True
+        self._obs_mean  = data.get("obs_mean")
+        self._obs_std   = data.get("obs_std")
+        self._fitted    = True
         logger.info("HMM loaded ← {}", path)
         return self
 
@@ -108,8 +120,10 @@ class RegimeDetector:
             raise ValueError(f"None of {_OBS_COLS} found in features")
         df  = features[cols].dropna()
         obs = df.values.astype(np.float64)
-        # Standardise each column to zero mean, unit std
-        obs = (obs - obs.mean(axis=0)) / (obs.std(axis=0) + 1e-9)
+        # Use stored training statistics if available (inference), else compute (training)
+        mean = self._obs_mean if self._obs_mean is not None else obs.mean(axis=0)
+        std  = self._obs_std  if self._obs_std  is not None else obs.std(axis=0)
+        obs  = (obs - mean) / (std + 1e-9)
         return obs, [len(obs)]
 
     def _label_states(self) -> None:
