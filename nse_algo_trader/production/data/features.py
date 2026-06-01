@@ -90,19 +90,15 @@ class FeatureEngineer:
         # Volume features: BankNifty 15min and all index daily bars have ~50% zero-volume
         # rows in Fyers historical data. vol_ratio = 0 on those bars means every
         # volume-gated strategy will be silent for half the dataset.
-        # Fix: when >= 30% of bars have vol == 0 AND the dataset looks like an index
-        # (whole-number volumes, all identical zeros), replace zero-volume bars with 1.0
-        # so they are treated as "average volume" and strategies can fire on them.
-        # NaN rows are always filled to prevent downstream NaN propagation into HMM.
+        # Fix: when >= 30% of bars have vol == 0, replace zeros with 1.0 so strategies
+        # can still fire using ADX/RSI/price filters.
         if "vol_ratio" in d.columns:
             zero_pct = (d["volume"] == 0).mean() if "volume" in d.columns else 0.0
             if zero_pct >= 0.30:
-                # Index symbol with unreliable volume at this timeframe — neutralise zeros
                 d["vol_ratio"] = d["vol_ratio"].replace(0, 1.0)
                 logger.debug(
                     "vol_ratio: {:.0%} zero-volume bars detected — replacing with 1.0 "
-                    "(index symbol or coarse timeframe). Volume-gated signals will use "
-                    "ADX/RSI/price filters only.",
+                    "(index symbol or coarse timeframe).",
                     zero_pct,
                 )
 

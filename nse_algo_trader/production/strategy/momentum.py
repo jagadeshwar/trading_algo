@@ -236,6 +236,7 @@ class MomentumStrategy:
         if direction == -1 and not (self.cfg.rsi_short_min <= rsi_val <= self.cfg.rsi_short_max):
             return None
 
+
         # ── News sentiment filter (Phase 2) ───────────────────────────────────
         try:
             from production.data.news_sentiment import get_sentiment
