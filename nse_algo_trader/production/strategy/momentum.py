@@ -20,21 +20,7 @@ import pandas as pd
 import yaml
 from loguru import logger
 
-
-@dataclass
-class Signal:
-    time: pd.Timestamp
-    symbol: str
-    direction: Literal[1, -1, 0]   # 1=Long, -1=Short, 0=Flat
-    confidence: float               # 0–1
-    entry_price: float
-    stop_price: float
-    target_price: float
-    atr: float
-    adx: float
-    vix: float | None
-    regime: str
-    reason: str                     # human-readable why signal fired
+from production.strategy.base import Signal  # shared Signal dataclass
 
 
 @dataclass
@@ -312,10 +298,11 @@ class MomentumStrategy:
             stop_price=stop,
             target_price=target,
             atr=atr,
+            strategy="momentum",
+            reason=reason,
             adx=f.get("adx", 0.0),
             vix=vix,
             regime=regime,
-            reason=reason,
         )
 
     # ── Position management helpers ───────────────────────────────────────────
