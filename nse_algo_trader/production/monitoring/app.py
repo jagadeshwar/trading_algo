@@ -1,17 +1,37 @@
 """NSE Algo Trader — Streamlit Dashboard entry point.
 
-Run with:
-    streamlit run production/monitoring/app.py
-    or
-    python run_dashboard.py
+Run locally:
+    streamlit run nse_algo_trader/production/monitoring/app.py   (from repo root)
+    streamlit run production/monitoring/app.py                   (from nse_algo_trader/)
+
+Deploy on Streamlit Community Cloud:
+    Main file : nse_algo_trader/production/monitoring/app.py
+    Branch    : master
+    Secrets   : see .streamlit/secrets.toml.example
 """
 
+import os
 import streamlit as st
 from pathlib import Path
 import sys
 
-# Make project root importable
-sys.path.insert(0, str(Path(__file__).parents[2]))
+# ── Path setup ─────────────────────────────────────────────────────────────────
+# Make nse_algo_trader/ importable regardless of CWD (local or Streamlit Cloud)
+_here = Path(__file__).resolve()
+_pkg  = _here.parents[2]   # nse_algo_trader/
+if str(_pkg) not in sys.path:
+    sys.path.insert(0, str(_pkg))
+
+# ── Streamlit Cloud secrets → env vars ────────────────────────────────────────
+# When running on Streamlit Community Cloud, credentials live in st.secrets.
+# Promote them to os.environ so existing dotenv-based code works unchanged.
+try:
+    for _k in ("FYERS_APP_ID", "FYERS_SECRET", "FYERS_REDIRECT_URI",
+               "DATABASE_URL", "TELEGRAM_TOKEN", "TELEGRAM_CHAT_ID", "REDIS_URL"):
+        if _k in st.secrets and _k not in os.environ:
+            os.environ[_k] = st.secrets[_k]
+except Exception:
+    pass  # not on Streamlit Cloud or no secrets configured yet
 
 st.set_page_config(
     page_title="NSE Algo Trader",

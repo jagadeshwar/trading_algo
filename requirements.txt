@@ -1,0 +1,53 @@
+# ── NSE Algo Trader — Streamlit Cloud requirements ────────────────────────────
+# Main file: nse_algo_trader/production/monitoring/app.py
+
+# Broker API
+fyers-apiv3>=3.1.7
+
+# Data & storage
+pandas>=2.0.0
+numpy>=1.24.0
+pyarrow>=12.0.0
+python-dotenv>=1.0.0
+
+# Technical indicators
+pandas-ta>=0.3.14b0
+
+# ML models (used at inference time in dashboard)
+xgboost>=2.0.0
+scikit-learn>=1.3.0
+hmmlearn>=0.3.0
+
+# Backtesting (used on Backtest page)
+vectorbt>=0.26.0
+
+# Dashboard & visualisation
+streamlit>=1.28.0
+plotly>=5.17.0
+
+# Logging & config
+loguru>=0.7.0
+pyyaml>=6.0.0
+
+# Database
+psycopg2-binary>=2.9.0
+sqlalchemy>=2.0.0
+
+# News sentiment
+vaderSentiment>=3.3.2
+
+# HTTP requests (option chain, news feeds)
+requests>=2.31.0
+aiohttp>=3.9.0
+
+# Scheduling
+APScheduler>=3.10.0
+
+# Event bus
+redis>=5.0.0
+
+# Validation
+pydantic>=2.0.0
+
+# Options pricing (Black-Scholes — uses stdlib math only, no extra dep)
+# scipy is optional; not required since we use math.erf for normal CDF
