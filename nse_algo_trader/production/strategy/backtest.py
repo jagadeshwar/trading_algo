@@ -26,24 +26,21 @@ RISK_FREE_RATE = 0.065   # 6.5% India 10-year gilt
 
 
 def load_ohlcv_and_features(symbol: str, interval_min: int) -> tuple[pd.DataFrame, pd.DataFrame]:
-    from production.data.fetcher import DataFetcher
+    """Load OHLCV and recompute features fresh (includes HMM regime label)."""
     from production.data.features import FeatureEngineer
+    import pyarrow.parquet as pq
 
-    slug = symbol.replace(":", "_").replace("-", "_")
+    slug       = symbol.replace(":", "_").replace("-", "_")
     ohlcv_path = Path(f"data/ohlcv/{slug}_{interval_min}min.parquet")
-    feat_path  = Path(f"data/features/{slug}_{interval_min}min_features.parquet")
 
     if not ohlcv_path.exists():
-        raise FileNotFoundError(f"OHLCV not found: {ohlcv_path}. Run day1_run.py first.")
-    if not feat_path.exists():
-        raise FileNotFoundError(f"Features not found: {feat_path}. Run day1_run.py first.")
+        raise FileNotFoundError(f"OHLCV not found: {ohlcv_path}. Run the data bootstrap first.")
 
-    import pyarrow.parquet as pq
     ohlcv = pq.read_table(ohlcv_path).to_pandas()
     ohlcv.index = pd.to_datetime(ohlcv.index, utc=True).tz_convert("Asia/Kolkata")
 
-    feats = pq.read_table(feat_path).to_pandas()
-    feats.index = pd.to_datetime(feats.index, utc=True).tz_convert("Asia/Kolkata")
+    hmm_path = str(Path("models/regime_hmm.pkl")) if Path("models/regime_hmm.pkl").exists() else None
+    feats    = FeatureEngineer().compute(ohlcv, hmm_model_path=hmm_path)
 
     return ohlcv, feats
 
@@ -53,8 +50,9 @@ def run_backtest(
     interval_min: int = 5,
     capital: float = 500_000,
     verbose: bool = True,
+    no_vol_filter: bool = False,
 ) -> dict:
-    from production.strategy.momentum import MomentumStrategy, load_config
+    from production.strategy.momentum import MomentumStrategy, load_config, StrategyConfig
 
     logger.info("Loading data for {} {}min...", symbol, interval_min)
     ohlcv, feats = load_ohlcv_and_features(symbol, interval_min)
@@ -77,9 +75,14 @@ def run_backtest(
     except Exception:
         pass
 
-    strategy = MomentumStrategy(load_config())
+    cfg = load_config()
+    if no_vol_filter:
+        cfg.volume_filter_ratio = 0.0   # bypass for index data with no historical volume
+        logger.info("Volume filter disabled (--no-vol-filter)")
+    strategy = MomentumStrategy(cfg)
     logger.info("Generating signals on {} bars...", len(feats))
-    signals_df = strategy.generate_signals_df(feats, close, vix=vix_series)
+    open_series = ohlcv["open"] if "open" in ohlcv.columns else None
+    signals_df = strategy.generate_signals_df(feats, close, vix=vix_series, open_=open_series)
 
     # ── Load NSE transaction costs ─────────────────────────────────────────────
     costs_cfg = {}
@@ -96,12 +99,25 @@ def run_backtest(
     try:
         import vectorbt as vbt
 
-        entries = signals_df["direction"] == 1
-        exits   = signals_df["direction"] == -1
+        # Apply same confidence + session filters as _manual_backtest
+        import datetime as _dt
+        _cfg = strategy.cfg
+        _s = _dt.time(*[int(x) for x in _cfg.session_start.split(":")])
+        _e = _dt.time(*[int(x) for x in _cfg.session_end.split(":")])
+        session_mask = pd.Series(
+            [_s <= t < _e for t in signals_df.index.time],
+            index=signals_df.index,
+        )
+        conf_mask = signals_df["confidence"] >= _cfg.min_confidence
+        valid_long  = (signals_df["direction"] == 1)  & conf_mask & session_mask
+        valid_short = (signals_df["direction"] == -1) & conf_mask & session_mask
 
-        # ATR-based SL/TP as price fractions (per-bar, aligned to entries)
-        sl_stop = (signals_df["atr"] * 2.0 / close).clip(0.005, 0.05)
-        tp_stop = (signals_df["atr"] * 3.0 / close).clip(0.005, 0.08)
+        entries = valid_long
+        exits   = valid_short
+
+        # ATR-based SL/TP using config multipliers
+        sl_stop = (signals_df["atr"] * _cfg.stop_atr_multiplier  / close).clip(0.002, 0.05)
+        tp_stop = (signals_df["atr"] * _cfg.target_atr_multiplier / close).clip(0.002, 0.10)
 
         # Fixed fractional sizing: 5% of capital per trade
         size = capital * 0.05 / close
@@ -110,8 +126,8 @@ def run_backtest(
             close         = close,
             entries       = entries,
             exits         = exits,
-            short_entries = signals_df["direction"] == -1,
-            short_exits   = signals_df["direction"] ==  1,
+            short_entries = valid_short,
+            short_exits   = valid_long,
             size          = size,
             size_type     = "amount",
             sl_stop       = sl_stop,
@@ -148,7 +164,7 @@ def run_backtest(
             "total_ret_pct": round(total_ret, 2),
             "win_rate_pct":  round(win_rate, 1),
             "profit_factor": round(profit_factor, 3),
-            "live_ready":    sharpe > 1.5 and max_dd < 10 and win_rate > 52,
+            "live_ready":    sharpe > 1.5 and max_dd < 10 and win_rate > 52 and profit_factor > 1.4,
         }
 
     except Exception as e:
@@ -170,60 +186,96 @@ def _manual_backtest(
     fee_pct: float,
     interval_min: int = 5,
 ) -> dict:
-    """Fallback bar-by-bar backtest when vectorbt has API issues."""
-    equity = capital
-    peak   = capital
-    max_dd = 0.0
-    trades: list[dict] = []
+    """Bar-by-bar backtest with correct Sharpe computed on equity curve returns."""
+    equity       = capital
+    peak         = capital
+    max_dd       = 0.0
+    trades:  list[dict] = []
+    equity_curve: list[float] = []   # equity at every bar — used for Sharpe
 
     position = None
     for ts, row in signals_df.iterrows():
-        price = close.loc[ts]
+        price = float(close.loc[ts])
 
+        # ── Check exits ────────────────────────────────────────────────────────
         if position:
-            d = position["direction"]
-            if (d == 1 and price <= position["stop"]) or \
-               (d == -1 and price >= position["stop"]):
-                pnl = d * (price - position["entry"]) * position["qty"]
-                pnl -= abs(price * position["qty"]) * fee_pct
-                trades.append({"pnl": pnl, "exit": "STOP"})
-                equity += pnl
-                position = None
-            elif (d == 1 and price >= position["target"]) or \
-                 (d == -1 and price <= position["target"]):
-                pnl = d * (price - position["entry"]) * position["qty"]
-                pnl -= abs(price * position["qty"]) * fee_pct
-                trades.append({"pnl": pnl, "exit": "TARGET"})
-                equity += pnl
+            d     = position["direction"]
+            entry = position["entry"]
+            qty   = position["qty"]
+            stop  = position["stop"]
+            tgt   = position["target"]
+
+            hit_stop   = (d == 1 and price <= stop)   or (d == -1 and price >= stop)
+            hit_target = (d == 1 and price >= tgt)    or (d == -1 and price <= tgt)
+
+            if hit_stop or hit_target:
+                gross = d * (price - entry) * qty
+                costs = price * qty * fee_pct
+                pnl   = gross - costs
+                trades.append({"pnl": pnl, "exit": "TARGET" if hit_target else "STOP"})
+                equity  += pnl
                 position = None
 
-        if position is None and row["direction"] != 0:
-            qty = max(1, int(capital * 0.05 / price))
+        # ── EOD forced exit at 15:25 ───────────────────────────────────────────
+        if position and hasattr(ts, 'time') and ts.time() >= __import__('datetime').time(15, 25):
+            d     = position["direction"]
+            gross = d * (price - position["entry"]) * position["qty"]
+            costs = price * position["qty"] * fee_pct
+            pnl   = gross - costs
+            trades.append({"pnl": pnl, "exit": "EOD"})
+            equity  += pnl
+            position = None
+
+        # ── New entry: session window 09:45–15:10, confidence >= 0.55 ─────────
+        import datetime as _dt
+        _t = ts.time() if hasattr(ts, 'time') else None
+        in_session = _t is not None and _dt.time(9, 45) <= _t < _dt.time(15, 10)
+        conf_ok    = float(row.get("confidence", 1.0)) >= 0.55
+        if position is None and row.get("direction", 0) != 0 and conf_ok and in_session:
+            qty  = max(1, int(capital * 0.05 / price))
             cost = price * qty * fee_pct
+            equity -= cost
             position = {
                 "direction": int(row["direction"]),
-                "entry": price,
-                "stop":  float(row["stop"]),
-                "target": float(row["target"]),
-                "qty":   qty,
+                "entry":     price,
+                "stop":      float(row["stop"])   if pd.notna(row.get("stop"))   else price * 0.98,
+                "target":    float(row["target"]) if pd.notna(row.get("target")) else price * 1.03,
+                "qty":       qty,
             }
-            equity -= cost
 
-        peak = max(peak, equity)
-        dd   = (peak - equity) / peak * 100
-        max_dd = max(max_dd, dd)
+        # ── Live equity (mark open position to market) ─────────────────────────
+        if position:
+            d   = position["direction"]
+            mtm = d * (price - position["entry"]) * position["qty"]
+            live_eq = equity + mtm
+        else:
+            live_eq = equity
+
+        equity_curve.append(live_eq)
+        peak   = max(peak, live_eq)
+        max_dd = max(max_dd, (peak - live_eq) / peak * 100)
 
     if not trades:
-        return {"total_trades": 0, "sharpe": 0, "max_dd_pct": max_dd,
+        return {"total_trades": 0, "sharpe": 0, "max_dd_pct": round(max_dd, 2),
                 "total_ret_pct": 0, "win_rate_pct": 0, "profit_factor": 0,
                 "live_ready": False, "bars": len(close), "signals": 0}
 
-    pnls  = [t["pnl"] for t in trades]
-    wins  = [p for p in pnls if p > 0]
-    losses= [p for p in pnls if p < 0]
-    bars_per_day = {1: 375, 5: 75, 15: 26, 1440: 1}.get(interval_min, 75)
-    daily_rets = pd.Series(pnls) / capital
-    sharpe = float(daily_rets.mean() / daily_rets.std() * np.sqrt(252 * bars_per_day)) if daily_rets.std() > 0 else 0
+    # ── Sharpe on per-trade returns (correct for intraday) ────────────────────
+    # Use each trade's PnL as a fraction of capital at entry.
+    # Annualise by estimated trades per year from the observed rate.
+    pnl_series  = pd.Series([t["pnl"] for t in trades])
+    trade_rets  = pnl_series / capital           # fraction of capital per trade
+    n_days      = (signals_df.index[-1] - signals_df.index[0]).days or 1
+    trades_pa   = max(len(trades) / n_days * 252, 1)   # estimated trades per year
+    if len(trade_rets) > 1 and trade_rets.std() > 0:
+        excess  = trade_rets.mean() - RISK_FREE_RATE / trades_pa
+        sharpe  = float(excess / trade_rets.std() * np.sqrt(trades_pa))
+    else:
+        sharpe  = 0.0
+
+    pnls   = [t["pnl"] for t in trades]
+    wins   = [p for p in pnls if p > 0]
+    losses = [p for p in pnls if p < 0]
 
     return {
         "total_trades":  len(trades),
@@ -232,7 +284,7 @@ def _manual_backtest(
         "total_ret_pct": round((equity - capital) / capital * 100, 2),
         "win_rate_pct":  round(len(wins) / len(trades) * 100, 1),
         "profit_factor": round(sum(wins) / abs(sum(losses)), 3) if losses else float("inf"),
-        "live_ready":    sharpe > 1.5 and max_dd < 10 and len(wins)/len(trades) > 0.52,
+        "live_ready":    sharpe > 1.5 and max_dd < 10 and len(wins) / len(trades) > 0.52 and (sum(wins) / abs(sum(losses)) if losses else float("inf")) > 1.4,
         "bars":          len(close),
         "signals":       int((signals_df["direction"] != 0).sum()),
     }
@@ -269,13 +321,16 @@ def _print_report(result: dict, signals_df: pd.DataFrame, close: pd.Series) -> N
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--symbol",   default="NSE:NIFTY50-INDEX")
-    parser.add_argument("--interval", default=5, type=int)
-    parser.add_argument("--capital",  default=500_000, type=float)
+    parser.add_argument("--symbol",         default="NSE:NIFTY50-INDEX")
+    parser.add_argument("--interval",       default=5, type=int)
+    parser.add_argument("--capital",        default=500_000, type=float)
+    parser.add_argument("--no-vol-filter",  action="store_true",
+                        help="Disable volume filter (for cash index data without historical volume)")
     args = parser.parse_args()
 
     from dotenv import load_dotenv
     load_dotenv()
 
     run_backtest(symbol=args.symbol, interval_min=args.interval,
-                 capital=args.capital, verbose=True)
+                 capital=args.capital, verbose=True,
+                 no_vol_filter=args.no_vol_filter)

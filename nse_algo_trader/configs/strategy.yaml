@@ -1,33 +1,234 @@
-primary_timeframe_min: 5     # primary strategy timeframe (minutes)
-timeframes_min: [1, 5, 15, 1440]
-
-signal_confidence_threshold: 0.6   # minimum alpha score to enter a trade
-target_bars_ahead: 3               # prediction horizon for direction model
-
-# Regime thresholds
-regime:
-  adx_trending_threshold: 25       # ADX > 25 = trending
-  adx_ranging_threshold: 20        # ADX < 20 = ranging
-
-# India VIX regime levels
+session:
+  start: 09:45
+  end: '15:10'
 vix:
-  very_low: 12        # mean reversion strategies preferred
-  normal_low: 15      # momentum strategies preferred
-  elevated: 20        # reduce position size
-  high: 25            # options premium selling opportunities
-  extreme: 30         # flatten aggressive positions / halt
-
-# Momentum strategy (Phase 1 — simple EMA crossover)
+  high: 25.0
+  elevated: 20.0
+regime:
+  adx_trending_threshold: 20.0
+phase21:
+  enabled_strategies:
+  - momentum
+  - trend_following
+  - breakout
+  - mean_reversion
+  - volatility_contraction
+  - range_trading
+  - relative_strength
+  - gap_trading
+  - price_action
+  - swing_trading
+  - buy_call
+  - sell_put
+  - bull_call_spread
+  - bull_put_spread
+  - call_back_spread
+  - call_front_spread
+  - buy_put
+  - sell_call
+  - bear_put_spread
+  - bear_call_spread
+  - put_back_spread
+  - put_front_spread
+  - iron_condor
+  - short_iron_butterfly
+  - short_iron_wonder
+  - short_straddle
+  - short_strangle
+  - long_call_butterfly
+  - long_calendar
 momentum:
   fast_ema: 9
   slow_ema: 21
-  volume_filter_ratio: 1.2    # volume must be > 1.2× 20-bar MA to confirm entry
-  stop_atr_multiplier: 2.0    # stop-loss = 2 × ATR below entry
-  target_atr_multiplier: 3.0  # take-profit = 3 × ATR above entry (1.5 R:R)
-
-# Mean reversion strategy (Phase 2)
+  volume_filter_ratio: 1.2
+  stop_atr_multiplier: 2.0
+  target_atr_multiplier: 3.0
+entry:
+  min_confidence: 0.55
+  require_bar_confirmation: false
+  rsi_long_min: 45.0
+  rsi_long_max: 70.0
+  rsi_short_min: 30.0
+  rsi_short_max: 55.0
+trend_following:
+  adx_max: 50.0
+  require_ema200_align: true
+  require_macd_confirm: true
+breakout:
+  channel_period: 20
+  volume_ratio: 1.5
+  adx_min: 20.0
+  adx_max: 50.0
+  stop_atr_mult: 1.5
+  target_atr_mult: 3.0
+  min_confidence: 0.55
+  vix_max: 28.0
 mean_reversion:
   bb_period: 20
   bb_std: 2.0
-  rsi_oversold: 30
-  rsi_overbought: 70
+  rsi_oversold: 35.0
+  rsi_overbought: 65.0
+  adx_max: 22.0
+  stop_atr_mult: 1.5
+  min_confidence: 0.55
+  vix_max: 25.0
+volatility_contraction:
+  min_squeeze_bars: 3
+  volume_ratio: 1.5
+  atr_ratio_max: 0.75
+  stop_atr_mult: 2.0
+  target_atr_mult: 3.0
+  min_confidence: 0.55
+  vix_max: 30.0
+range_trading:
+  proximity_pct: 0.005
+  adx_max: 22.0
+  min_range_pct: 0.005
+  stop_pct: 0.007
+  target_range_frac: 0.85
+  rsi_long_max: 55.0
+  rsi_short_min: 45.0
+  min_confidence: 0.52
+  vix_max: 20.0
+relative_strength:
+  rs_momentum_min: 0.02
+  rs_momentum_period: 20
+  volume_ratio: 1.2
+  stop_atr_mult: 2.0
+  target_atr_mult: 3.0
+  pullback_dist_min: -0.01
+  pullback_dist_max: 0.005
+  min_confidence: 0.55
+  vix_max: 25.0
+gap_trading:
+  gap_continuation_min: 0.01
+  gap_fade_min: 0.005
+  vol_continuation_min: 2.0
+  stop_cont_atr_mult: 2.0
+  target_cont_atr_mult: 2.5
+  stop_fade_atr_mult: 1.5
+  gap_session_end: '10:15'
+  min_confidence: 0.52
+  vix_max: 30.0
+price_action:
+  sr_proximity_pct: 0.005
+  volume_confirm: 1.2
+  stop_atr_mult: 1.0
+  target_atr_mult: 2.0
+  min_confidence: 0.52
+  vix_max: 28.0
+swing_trading:
+  pullback_low_pct: -0.01
+  pullback_high_pct: 0.005
+  rsi_min: 40.0
+  rsi_max: 60.0
+  adx_min: 20.0
+  adx_max: 40.0
+  pullback_vol_max: 0.9
+  stop_atr_mult: 2.5
+  target_atr_mult: 5.0
+  min_confidence: 0.55
+  vix_max: 22.0
+options_common:
+  dte: 7
+buy_call:
+  adx_min: 20.0
+  vix_max: 20.0
+  strike_sd: 0.0
+sell_put:
+  adx_max: 30.0
+  vix_min: 16.0
+  strike_sd: 1.0
+bull_call_spread:
+  adx_min: 20.0
+  vix_max: 25.0
+  long_sd: 0.0
+  short_sd: 1.0
+bull_put_spread:
+  vix_min: 15.0
+  adx_min: 20.0
+  short_sd: 0.8
+  long_sd: 1.5
+call_back_spread:
+  adx_min: 25.0
+  vix_max: 18.0
+  sell_sd: 0.5
+  buy_sd: 1.0
+  ratio: 2
+call_front_spread:
+  adx_min: 15.0
+  vix_min: 20.0
+  buy_sd: 0.0
+  sell_sd: 1.0
+buy_put:
+  adx_min: 20.0
+  vix_max: 20.0
+  strike_sd: 0.0
+sell_call:
+  adx_max: 30.0
+  vix_min: 16.0
+  strike_sd: 1.0
+bear_put_spread:
+  adx_min: 20.0
+  vix_max: 25.0
+  long_sd: 0.0
+  short_sd: 1.0
+bear_call_spread:
+  vix_min: 15.0
+  adx_min: 20.0
+  sell_sd: 0.8
+  buy_sd: 1.5
+put_back_spread:
+  adx_min: 25.0
+  vix_max: 18.0
+  sell_sd: 0.5
+  buy_sd: 1.0
+  ratio: 2
+put_front_spread:
+  adx_min: 15.0
+  vix_min: 20.0
+  buy_sd: 0.0
+  sell_sd: 1.0
+iron_condor:
+  adx_max: 20.0
+  vix_min: 15.0
+  vix_max: 35.0
+  sd_short: 1.5
+  sd_wing: 2.0
+  dte: 7
+short_iron_butterfly:
+  adx_max: 15.0
+  vix_min: 20.0
+  wing_sd: 1.0
+short_iron_wonder:
+  adx_max: 20.0
+  vix_min: 18.0
+  call_sd: 1.5
+  put_sd: 0.5
+  put_wing_sd: 1.5
+short_straddle:
+  adx_max: 12.0
+  vix_min: 25.0
+short_strangle:
+  adx_max: 12.0
+  vix_min: 22.0
+  strike_sd: 1.5
+long_call_butterfly:
+  adx_max: 20.0
+  vix_max: 18.0
+  wing_sd: 0.5
+long_calendar:
+  adx_max: 25.0
+  vix_max: 20.0
+phase2:
+  sentiment_bearish_block: -0.3
+  sentiment_bullish_block: 0.3
+  sentiment_cache_ttl_s: 300
+  xgb_n_estimators: 500
+  xgb_max_depth: 4
+  xgb_learning_rate: 0.05
+  xgb_subsample: 0.8
+  wfv_train_bars: 2000
+  wfv_test_bars: 500
+  wfv_n_windows: 5
+  wfv_dsr_threshold: 1.0
