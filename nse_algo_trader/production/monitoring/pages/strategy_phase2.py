@@ -244,7 +244,7 @@ less selective at 15min for BankNifty. **Recommended timeframes for index tradin
                 "Active in Regime": s["condition"],
                 "Type":            "Options",
                 "Enabled":         "✅" if enabled else "❌",
-                "Edge":            s["success"][:80] + "…",
+                "Edge":            f"Risk: {s['risk']} | Reward: {s['reward']}"[:80] + "…",
             })
 
         df = pd.DataFrame(rows)
