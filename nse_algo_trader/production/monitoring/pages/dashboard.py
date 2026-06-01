@@ -542,13 +542,20 @@ def render():
                     r["symbol"] for r in raw_rows if r.get("type") == "EXIT"
                 }
 
+                # Build symbol → direction lookup from ENTRY rows (EXIT rows don't store it)
+                direction_map: dict[str, str] = {
+                    r["symbol"]: r.get("direction", "")
+                    for r in raw_rows if r.get("type") == "ENTRY" and r.get("direction")
+                }
+
                 journal = []
                 for r in reversed(raw_rows):
                     trade_type = r.get("type", "")
                     pnl        = float(r.get("pnl", 0))
                     sym_raw    = r.get("symbol", "")
                     symbol     = sym_raw.replace("NSE:", "").replace("-EQ", "").replace("-INDEX", "")
-                    direction  = r.get("direction", "")
+                    # EXIT rows don't store direction — look it up from the matching ENTRY
+                    direction  = r.get("direction", "") or direction_map.get(sym_raw, "")
                     cap_after  = float(r.get("capital_after", 0))
                     live_price = live.get(sym_raw)
 
@@ -599,9 +606,12 @@ def render():
                         result = "✅ Profit" if pnl > 0 else ("❌ Loss" if pnl < 0 else "➖ B/E")
                         reason = r.get("reason", "").split()[0] if r.get("reason") else "—"
                         exit_px = float(r.get("price", 0))
+                        exit_type = ("🟢 LONG" if direction == "LONG"
+                                     else "🔴 SHORT" if direction == "SHORT"
+                                     else "🏁 EXIT")
                         journal.append({
                             "Time":           pd.to_datetime(r["time"], format="ISO8601").strftime("%d %b %H:%M"),
-                            "Type":           "🏁 EXIT",
+                            "Type":           exit_type,
                             "Symbol":         symbol,
                             "Qty":            r.get("qty"),
                             "Entry Price":    f"₹{float(r.get('entry_price',0)):,.2f}" if r.get('entry_price') else "—",
