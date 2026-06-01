@@ -599,9 +599,34 @@ Confidence scoring formula (base 0.50 + boosts):
     with tab_chain:
         st.subheader("🔴 Live Option Chain + Market Context")
         st.caption(
-            "Data source: NSE India (primary) → Fyers API (fallback) · "
-            "Greeks computed via Black-Scholes · Strike intervals: Nifty=50pt · BankNifty=100pt"
+            "Primary: Fyers API (auto-uses saved daily token) · "
+            "Greeks + IV: Black-Scholes · Strike intervals: Nifty=50pt · BankNifty=100pt"
         )
+
+        # ── Toggle: use live chain data in algo signal execution ──────────────
+        tog_col1, tog_col2 = st.columns([2, 2])
+        with tog_col1:
+            use_live_chain = st.toggle(
+                "🔗 Use live option chain in algo signals",
+                value=st.session_state.get("use_live_chain_for_signals", False),
+                key="live_chain_toggle",
+                help=(
+                    "ON: When the algo evaluates an options strategy signal, it fetches the "
+                    "live chain, resolves real strikes + premiums, and uses actual bid/ask for "
+                    "execution. The exact P&L profile (max profit, max loss, break-evens) is "
+                    "computed from real prices.\n\n"
+                    "OFF: Strategies use theoretical Expected Move (EM) based strikes only. "
+                    "Faster, works without Fyers session, but premiums are estimated."
+                ),
+            )
+            st.session_state["use_live_chain_for_signals"] = use_live_chain
+        with tog_col2:
+            if use_live_chain:
+                st.success("✅ Live chain ON — signals will use real premiums + strikes from Fyers")
+            else:
+                st.info("ℹ️ Live chain OFF — signals use EM-estimated strikes (theoretical)")
+
+        st.divider()
 
         # ── Symbol + expiry selector ───────────────────────────────────────────
         lc1, lc2, lc3, lc4 = st.columns(4)
@@ -612,23 +637,25 @@ Confidence scoring formula (base 0.50 + boosts):
                 key="chain_sym",
             )
         with lc2:
-            expiry_idx = st.number_input("Expiry (0=nearest)", 0, 5, 0, key="chain_exp")
+            expiry_idx = st.number_input("Expiry (0=nearest)", 0, 17, 0, key="chain_exp")
         with lc3:
             strike_cnt = st.number_input("Strikes around ATM", 5, 40, 20, key="chain_strikes")
         with lc4:
             exec_mode  = st.selectbox("Execution mode", ["paper", "live"], key="chain_mode")
 
-        fetch_col, _ = st.columns([1, 3])
+        fetch_col, refresh_col, _ = st.columns([1, 1, 2])
         with fetch_col:
             do_fetch = st.button("🔄 Fetch Live Chain", type="primary", key="do_fetch")
+        with refresh_col:
+            st.caption("Uses Fyers saved token (fyers_token.txt). No browser needed.")
 
         if do_fetch:
-            with st.spinner("Fetching option chain from NSE…"):
+            with st.spinner("Fetching option chain via Fyers API…"):
                 try:
                     from production.data.option_chain import OptionChainFetcher
                     from production.strategy.options_executor import OptionsExecutor
 
-                    # Try to get Fyers client from session state
+                    # OptionChainFetcher auto-creates Fyers client from saved token
                     fyers_client = st.session_state.get("fyers_client", None)
                     fetcher  = OptionChainFetcher(fyers_client=fyers_client)
                     chain    = fetcher.fetch(chain_sym, int(expiry_idx), int(strike_cnt), force_refresh=True)
@@ -638,11 +665,21 @@ Confidence scoring formula (base 0.50 + boosts):
                     st.session_state["live_chain"]    = chain
                     st.session_state["live_executor"] = executor
                     st.session_state["live_fetcher"]  = fetcher
-                    st.success(f"✅ Chain fetched from **{chain.source.upper()}** — {len(chain.quotes)//2} strikes · expiry {chain.expiry}")
+                    st.success(
+                        f"✅ Chain fetched via **{chain.source.upper()}** — "
+                        f"{len(chain.quotes)//2} strikes · expiry {chain.expiry} · "
+                        f"VIX {chain.vix:.2f} · underlying ₹{chain.underlying:,.0f}"
+                    )
+                    if use_live_chain:
+                        st.info("🔗 Live chain is active — strategy signals below will use real premiums.")
 
                 except Exception as ex:
                     st.error(f"Fetch failed: {ex}")
-                    st.info("If NSE is blocked, connect your Fyers session first (Dashboard → Connect Fyers), then retry.")
+                    st.warning(
+                        "**To fix:** Make sure your Fyers token is valid for today.\n\n"
+                        "Run in terminal: `cd nse_algo_trader && python auth.py --check`\n\n"
+                        "If expired: `python auth.py` (opens browser for login)"
+                    )
 
         chain = st.session_state.get("live_chain", None)
 
@@ -746,8 +783,12 @@ Confidence scoring formula (base 0.50 + boosts):
 
             # ── Strategy signals with real premiums ───────────────────────────
             st.divider()
-            st.subheader("🎯 Active Strategy Signals → Real Premiums")
-            st.caption("Strategies are evaluated against the current chain. Click Execute to place paper/live orders.")
+            chain_badge = "🔗 LIVE CHAIN" if use_live_chain else "📐 THEORETICAL"
+            st.subheader(f"🎯 Active Strategy Signals — {chain_badge} Premiums")
+            if use_live_chain:
+                st.caption("Strikes and premiums resolved from live Fyers chain. Click Execute to place paper/live orders.")
+            else:
+                st.caption("Premiums estimated from Expected Move formula. Toggle 'Use live chain' above for real premiums.")
 
             # Build feature row from chain for signal evaluation
             import pandas as _pd
@@ -775,9 +816,10 @@ Confidence scoring formula (base 0.50 + boosts):
                         continue
                     payoff = executor.compute_payoff(legs, chain.underlying)
 
-                    cat_icon = {"bullish": "📈", "bearish": "📉", "neutral": "⚖️"}.get(sig.category, "")
+                    cat_icon   = {"bullish": "📈", "bearish": "📉", "neutral": "⚖️"}.get(sig.category, "")
+                    chain_tag  = "🔗" if use_live_chain else "📐"
                     with st.expander(
-                        f"{cat_icon} **{sig.strategy.replace('_',' ').title()}** — "
+                        f"{cat_icon} {chain_tag} **{sig.strategy.replace('_',' ').title()}** — "
                         f"Net {'Credit' if payoff.net_premium > 0 else 'Debit'} "
                         f"₹{abs(payoff.net_premium):,.0f}  |  "
                         f"Max Profit ₹{payoff.max_profit:,.0f}  |  "

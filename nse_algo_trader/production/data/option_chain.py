@@ -1,10 +1,12 @@
 """Option Chain — live NSE option chain with Greeks, Max Pain, PCR, and market context.
 
 Data sources (in priority order):
-  1. NSE direct API  — https://www.nseindia.com/api/option-chain-indices?symbol=NIFTY
-                        Free, real-time, richest data. Requires session cookies.
-  2. Fyers API       — fyers.optionchain(). Official broker API, always available when
-                        the trading session is active.
+  1. Fyers API       — fyers.optionchain(). Primary source. Authenticated, reliable,
+                        returns oi/volume/bid/ask/ltp/symbol. IV is back-solved via
+                        Black-Scholes bisection since Fyers does not return IV directly.
+  2. NSE direct API  — Fallback only. NSE now uses Cloudflare protection (returns 403
+                        on most non-browser requests). Used as secondary when Fyers
+                        is unavailable (no active session).
 
 Provides per-strike:
   LTP · Bid/Ask · OI · OI Change · Volume · IV · Greeks (Δ Γ Θ V) · Fyers symbol
@@ -235,6 +237,82 @@ def bs_greeks(
         return OptionGreeks()
 
 
+# ── Implied Volatility (back-solve from price via bisection) ──────────────────
+
+def compute_iv(
+    price: float,
+    S: float,     # spot
+    K: float,     # strike
+    T: float,     # time to expiry (years)
+    option_type: str = "CE",
+    r: float = RISK_FREE,
+) -> float:
+    """Back-solve IV% from option market price using bisection (50 iterations).
+
+    Returns IV as a percentage (e.g. 18.5 for 18.5% IV).
+    Returns 0.0 if the price is below intrinsic value or T <= 0.
+    """
+    if T <= 1e-6 or price <= 0:
+        return 0.0
+
+    def _bs_price(sigma: float) -> float:
+        if sigma <= 0:
+            return 0.0
+        sqrt_T = math.sqrt(T)
+        d1 = (math.log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * sqrt_T)
+        d2 = d1 - sigma * sqrt_T
+        if option_type == "CE":
+            return S * _norm_cdf(d1) - K * math.exp(-r * T) * _norm_cdf(d2)
+        else:
+            return K * math.exp(-r * T) * _norm_cdf(-d2) - S * _norm_cdf(-d1)
+
+    lo, hi = 0.001, 10.0   # 0.1% → 1000% IV search range
+    for _ in range(60):
+        mid = (lo + hi) / 2
+        p   = _bs_price(mid)
+        diff = p - price
+        if abs(diff) < 0.05:
+            return round(mid * 100, 2)
+        if diff < 0:
+            lo = mid
+        else:
+            hi = mid
+    return round(mid * 100, 2)
+
+
+# ── Auto-create Fyers client from saved token ──────────────────────────────────
+
+def _make_fyers_client():
+    """Create a FyersModel instance from the saved daily token file.
+    Returns None if the token is missing or expired.
+    """
+    try:
+        import os, json
+        from pathlib import Path as _P
+        from dotenv import load_dotenv
+        load_dotenv()
+        token_path = _P("fyers_token.txt")
+        if not token_path.exists():
+            return None
+        data     = json.loads(token_path.read_text())
+        from datetime import date
+        if data.get("date") != date.today().isoformat():
+            logger.debug("Fyers token expired — re-login required")
+            return None
+        access_token = data["access_token"]
+        app_id       = os.environ.get("FYERS_APP_ID", "")
+        if not app_id:
+            return None
+        from fyers_apiv3 import fyersModel
+        return fyersModel.FyersModel(
+            client_id=app_id, is_async=False,
+            token=access_token, log_path=""
+        )
+    except Exception as e:
+        logger.debug("Could not build Fyers client: {}", e)
+        return None
+
+
 # ── Max Pain computation ───────────────────────────────────────────────────────
 
 def compute_max_pain(quotes: list[OptionQuote]) -> float:
@@ -426,67 +504,89 @@ def _parse_nse_chain(raw: dict, expiry_index: int = 0) -> OptionChainSnapshot | 
 def _parse_fyers_chain(
     response: dict, fyers_symbol: str, expiry_index: int = 0
 ) -> OptionChainSnapshot | None:
-    """Parse Fyers optionchain response → OptionChainSnapshot."""
-    data = response.get("data", {})
+    """Parse Fyers optionchain response → OptionChainSnapshot.
+
+    Actual Fyers API structure (verified 2026-06):
+      response['data']['optionsChain']  — flat list: underlying row (strike=-1) + all options
+      response['data']['expiryData']    — list of {date, expiry (unix timestamp), expiry_flag}
+      response['data']['indiavixData']  — VIX quote dict with 'ltp'
+      Each option item: {ask, bid, ltp, oi, oich, oichp, prev_oi, volume,
+                         option_type (CE/PE), strike_price, symbol, fyToken, ...}
+      NOTE: Fyers does NOT return IV — it is back-solved via Black-Scholes bisection.
+    """
+    data        = response.get("data", {})
     expiry_data = data.get("expiryData", [])
-    if not expiry_data:
+    all_chain   = data.get("optionsChain", [])
+    vix_data    = data.get("indiavixData", {})
+
+    if not all_chain:
         return None
 
-    expiry_index = min(expiry_index, len(expiry_data) - 1)
-    expiry_block = expiry_data[expiry_index]
-    expiry       = expiry_block.get("expiry", "")
-    chain        = expiry_block.get("optionsChain", [])
-    all_expiries = [e.get("expiry", "") for e in expiry_data]
-    T            = _days_to_expiry(expiry) / 365.0
+    expiry_index   = min(expiry_index, max(0, len(expiry_data) - 1))
+    all_expiry_dates = [e.get("date", "") for e in expiry_data]
 
+    # The optionchain is returned for the single expiry requested via timestamp.
+    # Extract underlying price from the row where strike_price == -1
     underlying = 0.0
+    for item in all_chain:
+        if item.get("strike_price", 0) == -1:
+            underlying = float(item.get("ltp", 0) or item.get("fp", 0) or 0)
+            break
+
+    # Target expiry date string (e.g. "02-06-2026")
+    expiry = all_expiry_dates[expiry_index] if all_expiry_dates else ""
+    T      = _days_to_expiry(expiry) / 365.0
+
+    # VIX from indiavixData
+    vix = float(vix_data.get("ltp", 0) or 0)
+
     quotes: list[OptionQuote] = []
+    for item in all_chain:
+        opt_type = item.get("option_type", "")
+        if opt_type not in ("CE", "PE"):
+            continue
+        strike = float(item.get("strike_price", 0) or 0)
+        if strike <= 0:
+            continue
 
-    for item in chain:
-        strike = float(item.get("strike_price", 0))
-        for opt_type, key in (("CE", "call_options"), ("PE", "put_options")):
-            leg = item.get(key, {})
-            if not leg:
-                continue
-            ltp    = float(leg.get("ltp",        0) or 0)
-            bid    = float(leg.get("bid_price",  0) or 0)
-            ask    = float(leg.get("ask_price",  0) or 0)
-            iv_pct = float(leg.get("implied_volatility", 0) or 0)
-            oi     = int(leg.get("open_interest", 0) or 0)
-            oi_chg = int(leg.get("oi_change",     0) or 0)
-            vol    = int(leg.get("volume",         0) or 0)
-            fyrsym = leg.get("symbol", "")
-            mid    = (bid + ask) / 2.0 if bid and ask else ltp
-            und    = float(leg.get("underlyingValue", underlying) or underlying)
-            if und: underlying = und
+        ltp    = float(item.get("ltp",    0) or 0)
+        bid    = float(item.get("bid",    0) or 0)
+        ask    = float(item.get("ask",    0) or 0)
+        oi     = int(item.get("oi",       0) or 0)
+        oi_chg = int(item.get("oich",     0) or 0)
+        vol    = int(item.get("volume",   0) or 0)
+        fyrsym = item.get("symbol",       "")
+        mid    = (bid + ask) / 2.0 if (bid > 0 and ask > 0) else ltp
 
-            sigma  = iv_pct / 100.0
-            greeks = bs_greeks(underlying or strike, strike, T, sigma, opt_type)
+        # Back-solve IV from market price (Fyers doesn't return IV)
+        iv_pct = compute_iv(ltp, underlying, strike, T, opt_type) if underlying > 0 and T > 0 and ltp > 0 else 0.0
+        sigma  = iv_pct / 100.0
+        greeks = bs_greeks(underlying, strike, T, sigma, opt_type)
 
-            quotes.append(OptionQuote(
-                strike=strike, expiry=expiry, option_type=opt_type,
-                fyers_symbol=fyrsym,
-                ltp=ltp, bid=bid, ask=ask, mid=mid,
-                iv=iv_pct, oi=oi, oi_change=oi_chg, volume=vol,
-                greeks=greeks, underlying=underlying,
-            ))
+        quotes.append(OptionQuote(
+            strike=strike, expiry=expiry, option_type=opt_type,
+            fyers_symbol=fyrsym,
+            ltp=ltp, bid=bid, ask=ask, mid=mid,
+            iv=iv_pct, oi=oi, oi_change=oi_chg, volume=vol,
+            greeks=greeks, underlying=underlying,
+        ))
 
     if not quotes:
         return None
 
     atm_strike = min((q.strike for q in quotes), key=lambda k: abs(k - underlying))
     atm_calls  = [q for q in quotes if q.option_type == "CE" and q.strike == atm_strike]
-    atm_iv     = atm_calls[0].iv if atm_calls else 0.0
+    atm_iv     = atm_calls[0].iv if atm_calls else (vix or 0.0)
     dte_days   = _days_to_expiry(expiry)
     em_1sd     = underlying * (atm_iv / 100) * math.sqrt(dte_days / 365) if atm_iv > 0 else 0.0
 
     return OptionChainSnapshot(
         symbol=fyers_symbol,
-        nse_symbol=NSE_CHAIN_SYMBOL.get(fyers_symbol, fyers_symbol),
+        nse_symbol=NSE_CHAIN_SYMBOL.get(fyers_symbol, fyers_symbol.split(":")[1]),
         expiry=expiry,
-        all_expiries=all_expiries,
+        all_expiries=all_expiry_dates,
         underlying=underlying,
-        vix=0.0,
+        vix=vix,
         timestamp=pd.Timestamp.now(tz="Asia/Kolkata"),
         quotes=quotes,
         max_pain=compute_max_pain(quotes),
@@ -501,13 +601,22 @@ def _parse_fyers_chain(
 # ── Main fetcher class ─────────────────────────────────────────────────────────
 
 class OptionChainFetcher:
-    """Fetch live option chain + market context. NSE primary, Fyers fallback."""
+    """Fetch live option chain + market context.
+
+    Priority: Fyers API (primary, authenticated) → NSE direct (fallback).
+    If no fyers_client is passed, auto-creates one from the saved daily token.
+    """
 
     _CACHE: dict[str, tuple[float, OptionChainSnapshot]] = {}
     _CACHE_TTL = 30  # seconds
 
     def __init__(self, fyers_client=None) -> None:
-        self._fyers = fyers_client
+        # Use provided client or auto-create from saved token
+        self._fyers = fyers_client or _make_fyers_client()
+        if self._fyers:
+            logger.debug("OptionChainFetcher: Fyers client ready")
+        else:
+            logger.warning("OptionChainFetcher: no Fyers client — will attempt NSE direct (may be blocked)")
 
     def fetch(
         self,
@@ -524,18 +633,19 @@ class OptionChainFetcher:
             if now - ts < self._CACHE_TTL:
                 return cached
 
-        snap = self._fetch_nse(symbol, expiry_index) or \
-               self._fetch_fyers(symbol, expiry_index, strike_count)
+        # Fyers first (primary), then NSE
+        snap = self._fetch_fyers(symbol, expiry_index, strike_count) or \
+               self._fetch_nse(symbol, expiry_index)
 
         if snap is None:
             raise RuntimeError(
                 f"Could not fetch option chain for {symbol}. "
-                "Check NSE connectivity and Fyers session."
+                "Fyers session may be expired — run: python auth.py"
             )
 
         self._CACHE[cache_key] = (now, snap)
-        logger.info("Option chain fetched: {} expiry={} strikes={} source={}",
-                    symbol, snap.expiry, len(snap.quotes) // 2, snap.source)
+        logger.info("Option chain: {} expiry={} strikes={} VIX={:.2f} source={}",
+                    symbol, snap.expiry, len(snap.quotes) // 2, snap.vix, snap.source)
         return snap
 
     def _fetch_nse(self, symbol: str, expiry_index: int) -> OptionChainSnapshot | None:
@@ -562,13 +672,34 @@ class OptionChainFetcher:
         if self._fyers is None:
             return None
         try:
-            resp = self._fyers.optionchain(data={
-                "symbol":      symbol,
-                "strikecount": strike_count,
-                "timestamp":   "",
+            # First call with no timestamp to get the expiry list
+            resp0 = self._fyers.optionchain(data={
+                "symbol": symbol, "strikecount": 2, "timestamp": "",
             })
-            if resp.get("s") != "ok":
+            if resp0.get("s") != "ok":
+                logger.warning("Fyers optionchain error: {}", resp0.get("message", resp0))
                 return None
+
+            expiry_data = resp0.get("data", {}).get("expiryData", [])
+            if not expiry_data:
+                return None
+
+            # For expiry_index > 0, re-fetch with the specific expiry timestamp
+            if expiry_index > 0 and expiry_index < len(expiry_data):
+                ts = expiry_data[expiry_index].get("expiry", "")
+                resp = self._fyers.optionchain(data={
+                    "symbol": symbol, "strikecount": strike_count, "timestamp": ts,
+                })
+                if resp.get("s") != "ok":
+                    resp = resp0  # fallback to first expiry
+            else:
+                # Fetch nearest expiry with full strike count
+                resp = self._fyers.optionchain(data={
+                    "symbol": symbol, "strikecount": strike_count, "timestamp": "",
+                })
+                if resp.get("s") != "ok":
+                    return None
+
             return _parse_fyers_chain(resp, symbol, expiry_index)
         except Exception as e:
             logger.warning("Fyers option chain failed ({}): {}", symbol, e)
