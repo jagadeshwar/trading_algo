@@ -73,7 +73,16 @@ with st.sidebar:
 
     page = st.radio(
         "Navigate",
-        ["📊 Dashboard", "🎮 Trading Controls", "📈 Charts", "🧪 Backtest", "⚙️ Config Editor", "📋 Logs"],
+        [
+            "📊 Dashboard",
+            "🎮 Trading Controls",
+            "📈 Charts",
+            "🧪 Backtest",
+            "📋 Strategy (Phase 1)",
+            "🧠 Strategy Phase 2",
+            "⚙️ Config Editor",
+            "📋 Logs",
+        ],
         label_visibility="collapsed",
     )
     st.divider()
@@ -123,6 +132,12 @@ elif page == "📈 Charts":
 elif page == "🧪 Backtest":
     from production.monitoring.pages import backtest
     backtest.render()
+elif page == "📋 Strategy (Phase 1)":
+    from production.monitoring.pages import strategy
+    strategy.render()
+elif page == "🧠 Strategy Phase 2":
+    from production.monitoring.pages import strategy_phase2
+    strategy_phase2.render()
 elif page == "⚙️ Config Editor":
     from production.monitoring.pages import config_editor
     config_editor.render()
