@@ -99,8 +99,10 @@ SYMBOLS_ALL  = [
 
 
 def is_market_open() -> bool:
-    now = datetime.now(IST).time()
-    return MARKET_OPEN <= now <= MARKET_CLOSE
+    now = datetime.now(IST)
+    if now.weekday() >= 5:  # Saturday=5, Sunday=6
+        return False
+    return MARKET_OPEN <= now.time() <= MARKET_CLOSE
 
 
 def load_latest_bar(symbol: str, interval_min: int) -> tuple[float, object] | None:
@@ -186,8 +188,9 @@ def run_paper_session(
     use_db: bool,
 ) -> None:
     from auth import get_fyers_client
-    from production.strategy.momentum import MomentumStrategy, load_config
+    from production.strategy.orchestrator import StrategyOrchestrator
     from production.execution.paper_trader import PaperTrader
+    import yaml
 
     logger.info("Initialising paper trading session")
     logger.info("Symbols: {}", symbols)
@@ -201,7 +204,19 @@ def run_paper_session(
         logger.error("Fyers auth failed: {}", e)
         fyers = None
 
-    strategy = MomentumStrategy(load_config())
+    strategy = StrategyOrchestrator()
+    try:
+        _cfg = yaml.safe_load(Path("configs/strategy.yaml").read_text()) or {}
+        _min_conf = float(_cfg.get("entry", {}).get("min_confidence", 0.55))
+    except Exception:
+        _min_conf = 0.55
+    logger.info("Min confidence threshold: {:.2f}", _min_conf)
+
+    from production.data.fetcher import DataFetcher
+    from production.data.features import FeatureEngineer
+    _fetcher = DataFetcher(fyers)
+    _fe      = FeatureEngineer()
+
     trader   = PaperTrader(capital=capital, use_db=use_db)
     trader.reset_daily()
     # Seed the circuit breaker so it doesn't trip during pre-market wait
@@ -263,10 +278,6 @@ def run_paper_session(
 
             # ── Refresh features from latest OHLCV on every bar ───────────────
             try:
-                from production.data.fetcher import DataFetcher
-                from production.data.features import FeatureEngineer
-                _fetcher = DataFetcher(fyers)
-                _fe      = FeatureEngineer()
                 _fetcher.incremental_update(days=1)   # one call refreshes all symbols
                 for sym in symbols:
                     try:
@@ -302,7 +313,15 @@ def run_paper_session(
 
                 # ── Generate signal ────────────────────────────────────────────
                 signal = strategy.evaluate_bar(symbol, last_feats, price, vix=vix)
-                if signal and signal.confidence >= 0.6:
+                if signal is None:
+                    logger.debug("No signal for {} (strategy={})", symbol, "all")
+                elif signal.confidence < _min_conf:
+                    logger.debug("Signal for {} below threshold: conf={:.2f} < {:.2f}",
+                                 symbol, signal.confidence, _min_conf)
+                if signal and signal.confidence >= _min_conf:
+                    logger.info("Signal: {} {} conf={:.2f} regime={} strategy={}",
+                                symbol, "LONG" if signal.direction == 1 else "SHORT",
+                                signal.confidence, signal.regime, signal.strategy)
                     capital_before = float(trader.equity)
                     fill = trader.on_signal(signal)
                     acted_on = fill is not None
