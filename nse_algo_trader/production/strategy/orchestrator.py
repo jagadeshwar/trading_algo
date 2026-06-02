@@ -64,7 +64,12 @@ def _load_cfg() -> dict:
 
 
 class StrategyOrchestrator:
-    """Runs all applicable strategies and returns ranked signals."""
+    """Runs all applicable strategies and returns ranked signals.
+
+    Phase 2 ML enhancements (applied transparently to all strategies):
+      - Regime routing via HMM model (falls back to heuristic if model unavailable)
+      - XGBoost confidence boost: +0.15 if agrees with signal, -0.10 if disagrees
+    """
 
     def __init__(self) -> None:
         cfg = _load_cfg()
@@ -77,7 +82,7 @@ class StrategyOrchestrator:
 
         # Directional strategies
         self._strategies: dict[str, object] = {}
-        if "momentum"              in enabled: self._strategies["momentum"]              = MomentumStrategy()
+        if "momentum"              in enabled: self._strategies["momentum"]              = MomentumStrategy(skip_xgb_boost=True)
         if "trend_following"       in enabled: self._strategies["trend_following"]       = TrendFollowingStrategy()
         if "breakout"              in enabled: self._strategies["breakout"]              = BreakoutStrategy()
         if "mean_reversion"        in enabled: self._strategies["mean_reversion"]        = MeanReversionStrategy()
@@ -89,14 +94,82 @@ class StrategyOrchestrator:
         if "swing_trading"         in enabled: self._strategies["swing_trading"]         = SwingTradingStrategy()
 
         # Options condition detectors (no directional trades)
-        # Uses the global ALL_OPTIONS_STRATEGIES registry — any name that appears in
-        # enabled_strategies and has a matching options strategy will be loaded.
         self._options_detectors = [
             s for s in ALL_OPTIONS_STRATEGIES if s.name in enabled
         ]
 
+        # Phase 2 ML: XGBoost model loaded once at startup (None=unloaded, False=failed)
+        self._xgb_clf = None
+
         logger.info("StrategyOrchestrator: {} directional strategies, {} options detectors loaded",
                     len(self._strategies), len(self._options_detectors))
+
+    # ── Regime detection ─────────────────────────────────────────────────────
+
+    def _detect_regime(self, f: pd.Series) -> str:
+        """Resolve regime from HMM label (Phase 2) with heuristic fallback.
+
+        HMM states: 0=RANGING, 1=TRENDING, 2=HIGH_VOL (3-state model).
+        Direction (UP/DOWN) is resolved by di_diff when TRENDING.
+        """
+        hmm_raw = f.get("regime_hmm", None)
+        if hmm_raw is not None:
+            try:
+                hmm_code = int(hmm_raw)
+                if hmm_code == 0:
+                    return "RANGING"
+                if hmm_code == 2:
+                    return "HIGH_VOL"
+                if hmm_code == 1:
+                    # HMM says TRENDING; use DI differential for direction
+                    di_diff = float(f.get("di_diff", 0.0))
+                    return "TRENDING_UP" if di_diff >= 0 else "TRENDING_DOWN"
+            except (ValueError, TypeError):
+                pass  # fall through to heuristic
+
+        # Heuristic fallback (always populated by FeatureEngineer)
+        heuristic_map = {0: "RANGING", 1: "TRENDING_UP", 2: "TRENDING_DOWN", 3: "HIGH_VOL"}
+        return heuristic_map.get(int(f.get("regime_heuristic", 0)), "UNKNOWN")
+
+    # ── XGBoost confidence boost ──────────────────────────────────────────────
+
+    def _xgb_adjust(self, signal: Signal, f: pd.Series) -> Signal:
+        """Apply XGBoost confidence delta to a signal. Modifies confidence in-place."""
+        xgb_path = Path("models/xgb_direction.pkl")
+        if not xgb_path.exists() or self._xgb_clf is False:
+            return signal
+
+        try:
+            if self._xgb_clf is None:
+                from production.models.xgb_classifier import DirectionClassifier
+                self._xgb_clf = DirectionClassifier().load(xgb_path)
+                logger.info("XGBoost model loaded for orchestrator confidence boost")
+
+            pred = self._xgb_clf.predict_bar(f)
+            if pred["direction"] == signal.direction:
+                delta = pred["confidence"] * 0.15
+                logger.debug("XGB agrees: +{:.3f} confidence for {}", delta, signal.strategy)
+            elif pred["direction"] == -signal.direction:
+                delta = -0.10
+                logger.debug("XGB disagrees: -0.10 confidence for {}", signal.strategy)
+            else:
+                delta = 0.0
+
+            signal = Signal(
+                time=signal.time, symbol=signal.symbol,
+                direction=signal.direction,
+                confidence=min(0.99, max(0.0, signal.confidence + delta)),
+                entry_price=signal.entry_price,
+                stop_price=signal.stop_price,
+                target_price=signal.target_price,
+                atr=signal.atr, adx=signal.adx, regime=signal.regime,
+                vix=signal.vix, reason=signal.reason, strategy=signal.strategy,
+            )
+        except Exception as e:
+            logger.warning("XGB boost failed, disabling for session: {}", e)
+            self._xgb_clf = False
+
+        return signal
 
     # ── Live bar-by-bar ──────────────────────────────────────────────────────
 
@@ -109,11 +182,8 @@ class StrategyOrchestrator:
         nifty_close: float | None = None,
         **kwargs,
     ) -> Signal | None:
-        """Evaluate all applicable strategies. Return highest-confidence signal or None."""
-        regime_code = int(latest_features.get("regime_heuristic", 0))
-        regime_map  = {0: "RANGING", 1: "TRENDING_UP", 2: "TRENDING_DOWN", 3: "HIGH_VOL"}
-        regime      = regime_map.get(regime_code, "UNKNOWN")
-
+        """Evaluate all applicable strategies. Return XGBoost-boosted highest-confidence signal."""
+        regime     = self._detect_regime(latest_features)
         applicable = REGIME_STRATEGY_MAP.get(regime, REGIME_STRATEGY_MAP["UNKNOWN"])
         candidates: list[Signal] = []
 
@@ -124,7 +194,7 @@ class StrategyOrchestrator:
             try:
                 extra: dict = {}
                 if name == "relative_strength":
-                    extra["nifty_close"] = nifty_close  # None is handled inside strategy
+                    extra["nifty_close"] = nifty_close
                 sig = strat.evaluate_bar(symbol, latest_features, close, vix=vix, **extra)
                 if sig is not None and sig.direction != 0:
                     candidates.append(sig)
@@ -134,11 +204,12 @@ class StrategyOrchestrator:
         if not candidates:
             return None
 
-        # Pick highest-confidence signal
-        best = max(candidates, key=lambda s: s.confidence)
-        if len(candidates) > 1:
-            logger.debug("Orchestrator: {} candidates for {} → best={} conf={:.2f}",
-                         len(candidates), symbol, best.strategy, best.confidence)
+        # Apply XGBoost boost to all candidates, then pick highest-confidence
+        boosted = [self._xgb_adjust(s, latest_features) for s in candidates]
+        best = max(boosted, key=lambda s: s.confidence)
+        if len(boosted) > 1:
+            logger.debug("Orchestrator: {} candidates for {} → best={} conf={:.2f} regime={}",
+                         len(boosted), symbol, best.strategy, best.confidence, regime)
         return best
 
     def evaluate_options(

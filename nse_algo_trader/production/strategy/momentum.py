@@ -77,8 +77,9 @@ def load_config(path: str = "configs/strategy.yaml") -> StrategyConfig:
 class MomentumStrategy:
     """EMA crossover momentum strategy for NSE indices and equities."""
 
-    def __init__(self, config: StrategyConfig | None = None) -> None:
+    def __init__(self, config: StrategyConfig | None = None, *, skip_xgb_boost: bool = False) -> None:
         self.cfg = config or load_config()
+        self._skip_xgb_boost = skip_xgb_boost  # True when orchestrator handles XGB globally
 
     # ── Vectorised signal generation (for backtesting) ────────────────────────
 
@@ -258,8 +259,9 @@ class MomentumStrategy:
         if abs(f.get("dist_ema_21", 0)) > 0.003: confidence += 0.05
 
         # ── XGBoost confidence boost (Phase 2) ────────────────────────────────
+        # Skipped when running under StrategyOrchestrator (which applies boost universally)
         xgb_model_path = Path("models/xgb_direction.pkl")
-        if xgb_model_path.exists():
+        if not self._skip_xgb_boost and xgb_model_path.exists():
             # _xgb_clf: None = unloaded, False = failed (skip retries), object = loaded
             if not hasattr(self, "_xgb_clf"):
                 self._xgb_clf = None
