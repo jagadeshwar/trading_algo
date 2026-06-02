@@ -210,6 +210,18 @@ class StrategyOrchestrator:
         if len(boosted) > 1:
             logger.debug("Orchestrator: {} candidates for {} → best={} conf={:.2f} regime={}",
                          len(boosted), symbol, best.strategy, best.confidence, regime)
+
+        # News sentiment gate (Phase 2) — block signals that oppose strong headlines
+        try:
+            from production.data.news_sentiment import get_sentiment
+            if get_sentiment().should_block(best.direction, symbol):
+                score = get_sentiment().score(symbol)
+                logger.info("Signal BLOCKED by news sentiment: {} direction={} score={:.2f}",
+                            symbol, "LONG" if best.direction == 1 else "SHORT", score)
+                return None
+        except Exception as e:
+            logger.debug("Sentiment gate skipped: {}", e)
+
         return best
 
     def evaluate_options(
