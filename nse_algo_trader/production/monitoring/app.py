@@ -68,7 +68,7 @@ st.markdown("""
 with st.sidebar:
     st.image("https://img.icons8.com/fluency/96/stock-share.png", width=64)
     st.title("NSE Algo Trader")
-    st.caption("Phase 1 — Momentum Strategy")
+    st.caption("Phase 2 — Multi-Strategy")
     st.divider()
 
     page = st.radio(
