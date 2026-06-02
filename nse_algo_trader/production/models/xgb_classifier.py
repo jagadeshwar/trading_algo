@@ -173,7 +173,6 @@ class DirectionClassifier:
             learning_rate   = self.learning_rate,
             subsample       = self.subsample,
             colsample_bytree= self.colsample,
-            use_label_encoder=False,
             eval_metric     = "mlogloss",
             random_state    = self.random_state,
             n_jobs          = -1,
