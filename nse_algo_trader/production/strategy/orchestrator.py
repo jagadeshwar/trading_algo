@@ -101,6 +101,11 @@ class StrategyOrchestrator:
         # Phase 2 ML: XGBoost model loaded once at startup (None=unloaded, False=failed)
         self._xgb_clf = None
 
+        # Phase 2 news sentiment thresholds (read from config, fallback to defaults)
+        p2 = cfg.get("phase2", {})
+        self._sent_bearish_block = float(p2.get("sentiment_bearish_block", -0.3))
+        self._sent_bullish_block = float(p2.get("sentiment_bullish_block", 0.3))
+
         logger.info("StrategyOrchestrator: {} directional strategies, {} options detectors loaded",
                     len(self._strategies), len(self._options_detectors))
 
@@ -214,10 +219,16 @@ class StrategyOrchestrator:
         # News sentiment gate (Phase 2) — block signals that oppose strong headlines
         try:
             from production.data.news_sentiment import get_sentiment
-            if get_sentiment().should_block(best.direction, symbol):
-                score = get_sentiment().score(symbol)
-                logger.info("Signal BLOCKED by news sentiment: {} direction={} score={:.2f}",
-                            symbol, "LONG" if best.direction == 1 else "SHORT", score)
+            sent = get_sentiment()
+            score = sent.score(symbol)
+            blocked = (
+                (best.direction == 1  and score < self._sent_bearish_block) or
+                (best.direction == -1 and score > self._sent_bullish_block)
+            )
+            if blocked:
+                logger.info("Signal BLOCKED by news sentiment: {} direction={} score={:.2f} thresholds=[{:.2f},{:.2f}]",
+                            symbol, "LONG" if best.direction == 1 else "SHORT",
+                            score, self._sent_bearish_block, self._sent_bullish_block)
                 return None
         except Exception as e:
             logger.debug("Sentiment gate skipped: {}", e)
