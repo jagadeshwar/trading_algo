@@ -324,10 +324,10 @@ def render():
             st.warning("🔴 **Paper trading is stopped**")
     with btn_col:
         if running:
-            if st.button("⏹️ Stop", type="primary", use_container_width=True):
+            if st.button("⏹️ Stop", type="primary", width="stretch"):
                 _stop(); time.sleep(1); st.rerun()
         else:
-            if st.button("▶️ Start", type="primary", use_container_width=True):
+            if st.button("▶️ Start", type="primary", width="stretch"):
                 prev = tc_state
                 syms = prev.get("symbols") or ["NSE:HDFCBANK-EQ"]
                 _start(syms, prev.get("interval", 15), float(prev.get("capital", 1_000_000)))
@@ -632,7 +632,7 @@ def render():
                     except Exception:
                         return ""
 
-                styled = df_journal.style.applymap(
+                styled = df_journal.style.map(
                     _style_cell, subset=["Realised P&L", "Unrealized"])
                 st.dataframe(styled, use_container_width=True, hide_index=True)
                 st.caption(

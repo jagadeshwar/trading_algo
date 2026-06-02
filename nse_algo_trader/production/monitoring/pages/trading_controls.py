@@ -208,7 +208,7 @@ def _render_topup(state: dict, running: bool) -> None:
 
         st.markdown(f"**After top-up:** ₹{capital:,.0f} + ₹{add_amount:,.0f} = **₹{capital+add_amount:,.0f}**")
 
-        if st.button(f"💰  Add ₹{add_amount:,.0f} Demo Capital", type="primary", use_container_width=True):
+        if st.button(f"💰  Add ₹{add_amount:,.0f} Demo Capital", type="primary", width="stretch"):
             with st.spinner("Applying top-up and restarting session..."):
                 _apply_topup(state, add_amount, reason or "Manual top-up", running)
                 time.sleep(3)
@@ -223,7 +223,7 @@ def _render_topup(state: dict, running: bool) -> None:
             "Fresh capital (₹)", min_value=100_000, max_value=50_000_000,
             value=int(capital), step=100_000, key="reset_capital",
         )
-        if st.button("🔄  Reset & Restart Fresh", type="secondary", use_container_width=True):
+        if st.button("🔄  Reset & Restart Fresh", type="secondary", width="stretch"):
             with st.spinner("Resetting..."):
                 if running:
                     _stop(); time.sleep(2)
@@ -370,7 +370,7 @@ def render():
         # ── STOP button ────────────────────────────────────────────────────────
         col_stop, col_info = st.columns([1, 2])
         with col_stop:
-            if st.button("⏹️  STOP PAPER TRADING", type="primary", use_container_width=True):
+            if st.button("⏹️  STOP PAPER TRADING", type="primary", width="stretch"):
                 with st.spinner("Stopping..."):
                     _stop()
                     time.sleep(2)
