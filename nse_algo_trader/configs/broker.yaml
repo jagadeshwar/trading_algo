@@ -21,6 +21,13 @@ latency_ms:
   fill_delay: 3000          # alert; switch broker if > 5000ms
   tick_to_trade: 500        # full pipeline target
 
+# NSE F&O lot sizes (units per lot) — used for position sizing in backtest
+lot_sizes:
+  "NSE:NIFTY50-INDEX":   25
+  "NSE:NIFTYBANK-INDEX": 15
+  "NSE:FINNIFTY-INDEX":  40
+  default:               1     # equity stocks
+
 # NSE transaction costs for backtest modeling
 transaction_costs:
   brokerage_per_order: 20       # ₹20 flat per executed order (Fyers)

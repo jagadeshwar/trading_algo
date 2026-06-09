@@ -81,7 +81,7 @@ def render():
             costs_cfg = yaml.safe_load(Path("configs/broker.yaml").read_text()).get("transaction_costs", {})
             fee = costs_cfg.get("exchange_fee_pct", 0.00345) / 100 + costs_cfg.get("slippage_pct", 0.02) / 100
 
-            result = _manual_backtest(signals_df, close, capital, fee, interval)
+            result = _manual_backtest(signals_df, close, capital, fee, interval, symbol=symbol)
             result.update({"symbol": symbol, "interval_min": interval})
 
             st.session_state.bt_result  = result

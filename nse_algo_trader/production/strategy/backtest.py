@@ -169,7 +169,7 @@ def run_backtest(
 
     except Exception as e:
         logger.warning("Vectorbt error ({}), falling back to manual calculation", e)
-        result = _manual_backtest(signals_df, close, capital, total_fee, interval_min)
+        result = _manual_backtest(signals_df, close, capital, total_fee, interval_min, symbol=symbol)
         result["symbol"] = symbol
         result["interval_min"] = interval_min
 
@@ -186,11 +186,20 @@ def _manual_backtest(
     fee_pct: float,
     interval_min: int = 5,
     min_confidence: float | None = None,
+    symbol: str = "",
 ) -> dict:
-    """Bar-by-bar backtest with correct Sharpe computed on equity curve returns."""
+    """Bar-by-bar backtest with lot-aware position sizing and correct Sharpe."""
     if min_confidence is None:
         from production.strategy.momentum import load_config
         min_confidence = load_config().min_confidence
+
+    # Lot size: 1 for equities, 25/15/40 for index futures
+    try:
+        _broker_cfg = yaml.safe_load(Path("configs/broker.yaml").read_text())
+        _lot_sizes  = _broker_cfg.get("lot_sizes", {})
+        lot_size    = _lot_sizes.get(symbol, _lot_sizes.get("default", 1))
+    except Exception:
+        lot_size = 1
     equity       = capital
     peak         = capital
     max_dd       = 0.0
@@ -236,8 +245,12 @@ def _manual_backtest(
         in_session = _t is not None and _dt.time(9, 45) <= _t < _dt.time(15, 10)
         conf_ok    = float(row.get("confidence", 1.0)) >= min_confidence
         if position is None and row.get("direction", 0) != 0 and conf_ok and in_session:
-            qty  = max(1, int(capital * 0.05 / price))
-            cost = price * qty * fee_pct
+            _stop  = float(row["stop"]) if pd.notna(row.get("stop")) else price * 0.98
+            _risk  = capital * 0.01                        # risk 1% of capital per trade
+            _stop_pts = max(abs(price - _stop), 1.0)
+            _lots  = max(1, int(_risk / (_stop_pts * lot_size)))
+            qty    = _lots * lot_size
+            cost   = price * qty * fee_pct
             equity -= cost
             position = {
                 "direction": int(row["direction"]),

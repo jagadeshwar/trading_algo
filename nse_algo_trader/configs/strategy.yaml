@@ -44,7 +44,7 @@ momentum:
   stop_atr_multiplier: 2.5
   target_atr_multiplier: 6.0
 entry:
-  min_confidence: 0.62
+  min_confidence: 0.60
   require_bar_confirmation: false
   rsi_long_min: 45.0
   rsi_long_max: 70.0
