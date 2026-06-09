@@ -1,8 +1,9 @@
 # ── NSE Algo Trader — Streamlit Cloud requirements ────────────────────────────
 # Main file: nse_algo_trader/production/monitoring/app.py
 
-# Broker API
-fyers-apiv3>=3.1.7
+# Broker API — fyers-apiv3 omitted: blocks Python >=3.14 (used on Streamlit
+# Cloud). Install locally for live trading; dashboard degrades gracefully.
+# fyers-apiv3>=3.1.7
 
 # Data & storage
 pandas>=2.0.0
@@ -11,7 +12,7 @@ pyarrow>=12.0.0
 python-dotenv>=1.0.0
 
 # Technical indicators
-pandas-ta==0.3.14b0
+pandas-ta>=0.4.0
 
 # ML models (used at inference time in dashboard)
 xgboost>=2.0.0

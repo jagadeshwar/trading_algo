@@ -24,8 +24,14 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from dotenv import load_dotenv
-from fyers_apiv3 import fyersModel
 from loguru import logger
+
+try:
+    from fyers_apiv3 import fyersModel
+    _FYERS_AVAILABLE = True
+except ImportError:
+    fyersModel = None  # type: ignore[assignment]
+    _FYERS_AVAILABLE = False
 
 load_dotenv()
 
@@ -143,8 +149,10 @@ def _refresh_token() -> str:
     return access_token
 
 
-def get_fyers_client(access_token: str | None = None) -> fyersModel.FyersModel:
+def get_fyers_client(access_token: str | None = None):  # -> fyersModel.FyersModel
     """Return an authenticated FyersModel instance."""
+    if not _FYERS_AVAILABLE:
+        raise RuntimeError("fyers-apiv3 is not installed. Live trading unavailable in this environment.")
     token = access_token or get_access_token()
     app_id = os.environ.get("FYERS_APP_ID")
     Path("logs").mkdir(exist_ok=True)
