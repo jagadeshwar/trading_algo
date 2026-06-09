@@ -6,10 +6,61 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import pandas_ta as ta
 import pyarrow as pa
 import pyarrow.parquet as pq
 from loguru import logger
+
+# ── Pure-pandas indicator helpers (no pandas-ta / numba dependency) ───────────
+
+def _ema(series: pd.Series, length: int) -> pd.Series:
+    return series.ewm(span=length, adjust=False).mean()
+
+def _rsi(close: pd.Series, length: int = 14) -> pd.Series:
+    delta = close.diff()
+    gain  = delta.clip(lower=0).ewm(span=length, adjust=False).mean()
+    loss  = (-delta.clip(upper=0)).ewm(span=length, adjust=False).mean()
+    return 100 - 100 / (1 + gain / loss.replace(0, np.nan))
+
+def _macd(close: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9):
+    line   = close.ewm(span=fast, adjust=False).mean() - close.ewm(span=slow, adjust=False).mean()
+    sig    = line.ewm(span=signal, adjust=False).mean()
+    return line, sig, line - sig        # macd, signal, histogram
+
+def _atr(high: pd.Series, low: pd.Series, close: pd.Series, length: int = 14) -> pd.Series:
+    tr = pd.concat([high - low,
+                    (high - close.shift()).abs(),
+                    (low  - close.shift()).abs()], axis=1).max(axis=1)
+    return tr.ewm(span=length, adjust=False).mean()
+
+def _bbands(close: pd.Series, length: int = 20, std: float = 2.0):
+    mid   = close.rolling(length).mean()
+    sigma = close.rolling(length).std()
+    return mid + std * sigma, mid, mid - std * sigma   # upper, mid, lower
+
+def _vwap(high: pd.Series, low: pd.Series, close: pd.Series, volume: pd.Series) -> pd.Series:
+    typical  = (high + low + close) / 3
+    dates    = pd.Series(close.index, index=close.index).dt.normalize() if hasattr(close.index, 'normalize') else pd.to_datetime(close.index).normalize()
+    cum_tpv  = (typical * volume).groupby(dates).cumsum()
+    cum_vol  = volume.groupby(dates).cumsum()
+    return cum_tpv / cum_vol.replace(0, np.nan)
+
+def _obv(close: pd.Series, volume: pd.Series) -> pd.Series:
+    return (np.sign(close.diff()).fillna(0) * volume).cumsum()
+
+def _adx(high: pd.Series, low: pd.Series, close: pd.Series, length: int = 14):
+    tr      = pd.concat([high - low,
+                         (high - close.shift()).abs(),
+                         (low  - close.shift()).abs()], axis=1).max(axis=1)
+    atr     = tr.ewm(span=length, adjust=False).mean()
+    up, dn  = high.diff(), -low.diff()
+    pdm = pd.Series(np.where((up > dn) & (up > 0), up, 0.0), index=close.index)
+    ndm = pd.Series(np.where((dn > up) & (dn > 0), dn, 0.0), index=close.index)
+    pdi = 100 * pdm.ewm(span=length, adjust=False).mean() / atr.replace(0, np.nan)
+    ndi = 100 * ndm.ewm(span=length, adjust=False).mean() / atr.replace(0, np.nan)
+    dx  = 100 * (pdi - ndi).abs() / (pdi + ndi).replace(0, np.nan)
+    return dx.ewm(span=length, adjust=False).mean(), pdi, ndi  # adx, +DI, -DI
+
+# ─────────────────────────────────────────────────────────────────────────────
 
 FEATURES_DIR = Path("data/features")
 
@@ -142,7 +193,7 @@ class FeatureEngineer:
 
     def _ema_features(self, d: pd.DataFrame) -> None:
         for p in self.ema_periods:
-            d[f"ema_{p}"] = ta.ema(d["close"], length=p)
+            d[f"ema_{p}"] = _ema(d["close"], p)
             d[f"dist_ema_{p}"] = (d["close"] - d[f"ema_{p}"]) / d[f"ema_{p}"]
 
         e9, e21, e50, e200 = (
@@ -168,58 +219,44 @@ class FeatureEngineer:
     # ── Momentum features ─────────────────────────────────────────────────────
 
     def _momentum_features(self, d: pd.DataFrame) -> None:
-        rsi = ta.rsi(d["close"], length=self.rsi_period)
+        rsi = _rsi(d["close"], self.rsi_period)
         d["rsi"] = rsi
         d["rsi_oversold"] = (rsi < 30).astype(int)
         d["rsi_overbought"] = (rsi > 70).astype(int)
         d["rsi_slope"] = rsi.diff(3)
 
-        macd_df = ta.macd(d["close"])
-        if macd_df is not None and not macd_df.empty:
-            macd_col = [c for c in macd_df.columns if c.startswith("MACD_") and "s" not in c.lower() and "h" not in c.lower()]
-            hist_col = [c for c in macd_df.columns if "h" in c.lower() or "MACDH" in c]
-            if macd_col:
-                d["macd_norm"] = macd_df[macd_col[0]] / d["close"]
-            if hist_col:
-                d["macd_hist_norm"] = macd_df[hist_col[0]] / d["close"]
-                prev_hist = macd_df[hist_col[0]].shift(1)
-                curr_hist = macd_df[hist_col[0]]
-                d["macd_cross"] = np.sign(curr_hist) - np.sign(prev_hist)
+        macd_line, _sig, macd_hist = _macd(d["close"])
+        d["macd_norm"]      = macd_line / d["close"]
+        d["macd_hist_norm"] = macd_hist / d["close"]
+        d["macd_cross"]     = np.sign(macd_hist) - np.sign(macd_hist.shift(1))
 
     # ── Volatility features ───────────────────────────────────────────────────
 
     def _volatility_features(self, d: pd.DataFrame) -> None:
-        atr = ta.atr(d["high"], d["low"], d["close"], length=self.atr_period)
+        atr = _atr(d["high"], d["low"], d["close"], self.atr_period)
         d["atr_pct"] = atr / d["close"]
         atr_ma = atr.rolling(self.volume_ma_period).mean()
         d["atr_ratio"] = atr / atr_ma
 
-        bb = ta.bbands(d["close"], length=self.bb_period, std=self.bb_std)
-        if bb is not None and not bb.empty:
-            upper_col = [c for c in bb.columns if "U" in c][0]
-            lower_col = [c for c in bb.columns if "L" in c][0]
-            mid_col = [c for c in bb.columns if "M" in c][0]
-            width = bb[upper_col] - bb[lower_col]
-            d["bb_width"] = width / bb[mid_col]
-            d["bb_pct_b"] = (d["close"] - bb[lower_col]) / (bb[upper_col] - bb[lower_col])
-            width_ma = width.rolling(self.volume_ma_period).mean()
-            d["bb_squeeze"] = (width < width_ma).astype(int)
+        bb_upper, bb_mid, bb_lower = _bbands(d["close"], self.bb_period, self.bb_std)
+        width = bb_upper - bb_lower
+        d["bb_width"]  = width / bb_mid
+        d["bb_pct_b"]  = (d["close"] - bb_lower) / width.replace(0, np.nan)
+        width_ma = width.rolling(self.volume_ma_period).mean()
+        d["bb_squeeze"] = (width < width_ma).astype(int)
 
     # ── Volume features ───────────────────────────────────────────────────────
 
     def _volume_features(self, d: pd.DataFrame) -> None:
-        vwap = ta.vwap(d["high"], d["low"], d["close"], d["volume"])
-        if vwap is not None:
-            d["vwap_dev"] = (d["close"] - vwap) / vwap
+        vwap = _vwap(d["high"], d["low"], d["close"], d["volume"])
+        d["vwap_dev"] = (d["close"] - vwap) / vwap.replace(0, np.nan)
 
         vol_ma = d["volume"].rolling(self.volume_ma_period).mean()
         d["vol_ratio"] = d["volume"] / vol_ma
 
-        obv = ta.obv(d["close"], d["volume"])
-        if obv is not None:
-            obv_std = obv.rolling(self.volume_ma_period).std()
-            obv_std = obv_std.replace(0, np.nan)
-            d["obv_norm"] = (obv - obv.rolling(self.volume_ma_period).mean()) / obv_std
+        obv = _obv(d["close"], d["volume"])
+        obv_std = obv.rolling(self.volume_ma_period).std().replace(0, np.nan)
+        d["obv_norm"] = (obv - obv.rolling(self.volume_ma_period).mean()) / obv_std
 
         # Buy/sell volume proxy: up-bar volume vs down-bar volume
         up_vol = d["volume"].where(d["close"] > d["open"], 0.0)
@@ -232,14 +269,11 @@ class FeatureEngineer:
     # ── Regime features ───────────────────────────────────────────────────────
 
     def _regime_features(self, d: pd.DataFrame) -> None:
-        adx_df = ta.adx(d["high"], d["low"], d["close"], length=self.adx_period)
-        if adx_df is not None and not adx_df.empty:
-            adx_col = [c for c in adx_df.columns if c.startswith("ADX_")][0]
-            dmp_col = [c for c in adx_df.columns if "DMP" in c][0]
-            dmn_col = [c for c in adx_df.columns if "DMN" in c][0]
-            d["adx"] = adx_df[adx_col]
-            d["di_diff"] = adx_df[dmp_col] - adx_df[dmn_col]
-            adx_vals = adx_df[adx_col]
+        adx_vals, pdi, ndi = _adx(d["high"], d["low"], d["close"], self.adx_period)
+        d["adx"]     = adx_vals
+        d["di_diff"] = pdi - ndi
+        if True:
+            adx_vals = d["adx"]
             atr_pct = d.get("atr_pct", pd.Series(0.0, index=d.index))
             regime = np.where(
                 atr_pct > atr_pct.rolling(20).mean() * 1.5, 3,
@@ -285,9 +319,7 @@ class FeatureEngineer:
             return
         try:
             kc_mid   = d["close"].ewm(span=20, adjust=False).mean()
-            kc_atr   = ta.atr(d["high"], d["low"], d["close"], length=10)
-            if kc_atr is None:
-                return
+            kc_atr   = _atr(d["high"], d["low"], d["close"], 10)
             kc_upper = kc_mid + 1.5 * kc_atr
             kc_lower = kc_mid - 1.5 * kc_atr
 

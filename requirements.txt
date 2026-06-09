@@ -11,8 +11,8 @@ numpy>=1.24.0
 pyarrow>=12.0.0
 python-dotenv>=1.0.0
 
-# Technical indicators
-pandas-ta>=0.4.0
+# Technical indicators — pandas-ta replaced with pure-pandas helpers in
+# production/data/features.py; no numba/llvmlite dependency
 
 # ML models (used at inference time in dashboard)
 xgboost>=2.0.0
