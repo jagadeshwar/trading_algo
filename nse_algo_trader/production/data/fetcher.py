@@ -84,7 +84,18 @@ class DataFetcher:
         }
 
         logger.info("Fetching {} {}min ({}d)", symbol, interval_min, lookback)
-        response = self._fyers.history(data=data)
+
+        # Retry once on rate-limit; Fyers resets per-minute quota after 60s
+        for attempt in range(2):
+            response = self._fyers.history(data=data)
+            if response.get("s") == "ok":
+                break
+            msg = response.get("message", "")
+            if "request limit" in msg.lower() and attempt == 0:
+                logger.warning("Rate limit hit for {} — waiting 65s before retry", symbol)
+                time.sleep(65)
+            else:
+                raise RuntimeError(f"Fyers history error for {symbol}: {msg}")
 
         if response.get("s") != "ok":
             raise RuntimeError(f"Fyers history error for {symbol}: {response.get('message')}")
@@ -125,7 +136,17 @@ class DataFetcher:
                 "range_to": end_dt.strftime("%Y-%m-%d"),
                 "cont_flag": "1",
             }
-            response = self._fyers.history(data=data)
+            for attempt in range(2):
+                response = self._fyers.history(data=data)
+                if response.get("s") == "ok":
+                    break
+                msg = response.get("message", "")
+                if "request limit" in msg.lower() and attempt == 0:
+                    logger.warning("Rate limit hit (chunked) — waiting 65s")
+                    time.sleep(65)
+                else:
+                    logger.warning("Chunk fetch failed for {}: {}", symbol, msg)
+                    break
             if response.get("s") == "ok" and response.get("candles"):
                 frames.append(
                     pd.DataFrame(
@@ -133,7 +154,7 @@ class DataFetcher:
                         columns=["timestamp", "open", "high", "low", "close", "volume"],
                     )
                 )
-            time.sleep(0.2)  # respect rate limits
+            time.sleep(0.5)  # respect rate limits
             end_dt = start_dt
             lookback -= fetch_days
 
@@ -251,8 +272,10 @@ class DataFetcher:
                     df = self.fetch_historical(symbol, interval_min, days=days)
                     if not df.empty:
                         self.save_ohlcv(df, symbol, interval_min)
+                    time.sleep(0.5)   # avoid hitting Fyers per-minute request limit
                 except Exception as e:
                     logger.error("Incremental update failed {} {}min: {}", symbol, interval_min, e)
+                    time.sleep(1.0)   # back off longer after any error
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
