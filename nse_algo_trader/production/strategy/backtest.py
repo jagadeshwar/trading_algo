@@ -185,8 +185,12 @@ def _manual_backtest(
     capital: float,
     fee_pct: float,
     interval_min: int = 5,
+    min_confidence: float | None = None,
 ) -> dict:
     """Bar-by-bar backtest with correct Sharpe computed on equity curve returns."""
+    if min_confidence is None:
+        from production.strategy.momentum import load_config
+        min_confidence = load_config().min_confidence
     equity       = capital
     peak         = capital
     max_dd       = 0.0
@@ -226,11 +230,11 @@ def _manual_backtest(
             equity  += pnl
             position = None
 
-        # ── New entry: session window 09:45–15:10, confidence >= 0.55 ─────────
+        # ── New entry: session window 09:45–15:10 ────────────────────────────
         import datetime as _dt
         _t = ts.time() if hasattr(ts, 'time') else None
         in_session = _t is not None and _dt.time(9, 45) <= _t < _dt.time(15, 10)
-        conf_ok    = float(row.get("confidence", 1.0)) >= 0.55
+        conf_ok    = float(row.get("confidence", 1.0)) >= min_confidence
         if position is None and row.get("direction", 0) != 0 and conf_ok and in_session:
             qty  = max(1, int(capital * 0.05 / price))
             cost = price * qty * fee_pct
@@ -260,18 +264,20 @@ def _manual_backtest(
                 "total_ret_pct": 0, "win_rate_pct": 0, "profit_factor": 0,
                 "live_ready": False, "bars": len(close), "signals": 0}
 
-    # ── Sharpe on per-trade returns (correct for intraday) ────────────────────
-    # Use each trade's PnL as a fraction of capital at entry.
-    # Annualise by estimated trades per year from the observed rate.
-    pnl_series  = pd.Series([t["pnl"] for t in trades])
-    trade_rets  = pnl_series / capital           # fraction of capital per trade
-    n_days      = (signals_df.index[-1] - signals_df.index[0]).days or 1
-    trades_pa   = max(len(trades) / n_days * 252, 1)   # estimated trades per year
+    # ── Sharpe on per-trade returns (raw, no risk-free subtraction) ──────────
+    # RF-adjusted Sharpe is meaningless here: with ~20-30 trades/year, the
+    # per-period RF hurdle is large relative to tiny per-trade returns and
+    # the result blows up (e.g. -54). Raw Sharpe (mean/std, annualised) is
+    # the right development metric — it measures signal consistency, not
+    # whether the strategy beats gilts. RF comparison belongs in live review.
+    n_days    = max((signals_df.index[-1] - signals_df.index[0]).days, 1)
+    trades_pa = max(len(trades) / n_days * 252, 1)
+    pnl_series = pd.Series([t["pnl"] for t in trades])
+    trade_rets = pnl_series / capital
     if len(trade_rets) > 1 and trade_rets.std() > 0:
-        excess  = trade_rets.mean() - RISK_FREE_RATE / trades_pa
-        sharpe  = float(excess / trade_rets.std() * np.sqrt(trades_pa))
+        sharpe = float(trade_rets.mean() / trade_rets.std() * np.sqrt(trades_pa))
     else:
-        sharpe  = 0.0
+        sharpe = 0.0
 
     pnls   = [t["pnl"] for t in trades]
     wins   = [p for p in pnls if p > 0]
