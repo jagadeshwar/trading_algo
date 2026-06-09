@@ -11,7 +11,7 @@ pyarrow>=12.0.0
 python-dotenv>=1.0.0
 
 # Technical indicators
-pandas-ta>=0.3.14b0
+pandas-ta==0.3.14b0
 
 # ML models (used at inference time in dashboard)
 xgboost>=2.0.0
