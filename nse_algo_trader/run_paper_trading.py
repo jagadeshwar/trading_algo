@@ -35,16 +35,17 @@ def _write_state(state: dict) -> None:
     STATE_FILE.write_text(json.dumps(state, default=str))
 
 
-def _append_signal(signal, acted_on: bool) -> None:
+def _append_signal(signal, acted_on: bool, skip_reason: str = "") -> None:
     SIGNALS_FILE.parent.mkdir(parents=True, exist_ok=True)
     row = {
-        "time":      str(signal.time),
-        "symbol":    signal.symbol,
-        "direction": signal.direction,
-        "confidence": round(signal.confidence, 4),
-        "regime":    signal.regime,
-        "reason":    signal.reason,
-        "acted_on":  acted_on,
+        "time":        str(signal.time),
+        "symbol":      signal.symbol,
+        "direction":   signal.direction,
+        "confidence":  round(signal.confidence, 4),
+        "regime":      signal.regime,
+        "reason":      signal.reason,
+        "acted_on":    acted_on,
+        "skip_reason": skip_reason,
     }
     with SIGNALS_FILE.open("a") as f:
         f.write(json.dumps(row) + "\n")
@@ -316,16 +317,18 @@ def run_paper_session(
                 if signal is None:
                     logger.debug("No signal for {} (strategy={})", symbol, "all")
                 elif signal.confidence < _min_conf:
-                    logger.debug("Signal for {} below threshold: conf={:.2f} < {:.2f}",
-                                 symbol, signal.confidence, _min_conf)
+                    conf_skip = (f"Confidence {signal.confidence:.0%} below threshold "
+                                 f"{_min_conf:.0%}")
+                    logger.debug("Signal for {} skipped: {}", symbol, conf_skip)
+                    _append_signal(signal, False, conf_skip)
                 if signal and signal.confidence >= _min_conf:
                     logger.info("Signal: {} {} conf={:.2f} regime={} strategy={}",
                                 symbol, "LONG" if signal.direction == 1 else "SHORT",
                                 signal.confidence, signal.regime, signal.strategy)
                     capital_before = float(trader.equity)
-                    fill = trader.on_signal(signal)
+                    fill, skip_reason = trader.on_signal(signal)
                     acted_on = fill is not None
-                    _append_signal(signal, acted_on)
+                    _append_signal(signal, acted_on, skip_reason)
                     if fill:
                         direction_str = "LONG" if signal.direction == 1 else "SHORT"
                         _append_trade(fill, "ENTRY", direction_str,

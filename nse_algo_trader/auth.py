@@ -83,7 +83,17 @@ def _today() -> str:
 
 
 def get_access_token() -> str:
-    """Return today's cached token if valid, otherwise trigger a new browser login."""
+    """Return today's cached token if valid, otherwise trigger a new browser login.
+
+    On Streamlit Cloud (or any environment without a local browser), set the
+    FYERS_ACCESS_TOKEN environment variable / Streamlit secret to bypass OAuth.
+    """
+    # Cloud / CI: token injected via env var or Streamlit secrets
+    env_token = os.environ.get("FYERS_ACCESS_TOKEN", "").strip()
+    if env_token:
+        logger.info("Using FYERS_ACCESS_TOKEN from environment")
+        return env_token
+
     if TOKEN_FILE.exists():
         try:
             data = json.loads(TOKEN_FILE.read_text())

@@ -300,6 +300,48 @@ def _show_toast() -> None:
         pass
 
 
+def _parse_trend(reason: str) -> str:
+    """Condense a trade reason into a short trend/pattern label."""
+    if not reason:
+        return "—"
+    lower = reason.lower()
+    if "eod_exit" in lower:
+        return "🕐 EOD Exit"
+    if reason.startswith("STOP"):
+        return "🛑 Stop Hit"
+    if reason.startswith("TARGET"):
+        return "🎯 Target Hit"
+    if "reversal" in lower:
+        return "↩ Reversal"
+    if "bear_engulf" in lower:
+        return "🕯 Bear Engulf"
+    if "bull_engulf" in lower:
+        return "🕯 Bull Engulf"
+    if "pin_bar" in lower:
+        return "📍 Pin Bar"
+    if "hammer" in lower:
+        return "🔨 Hammer"
+    if "shooting_star" in lower:
+        return "⭐ Shooting Star"
+    if "doji" in lower:
+        return "➕ Doji"
+    if "ema21" in lower or "ema_21" in lower:
+        adx = ""
+        if "adx=" in lower:
+            try:
+                adx = " ADX=" + reason.split("ADX=")[1].split("|")[0].strip().split()[0]
+            except Exception:
+                pass
+        if "bounce" in lower:
+            return f"📉 EMA21 Bounce{adx}"
+        if "pullback" in lower:
+            return f"📈 EMA21 Pullback{adx}"
+        return f"📊 EMA21{adx}"
+    if "trend continuation" in lower or "strong trend" in lower:
+        return "🔥 Trend Follow"
+    return reason[:22] + "…" if len(reason) > 22 else reason
+
+
 def render():
     import os, signal, time
     from production.monitoring.pages.trading_controls import (
@@ -409,6 +451,94 @@ def render():
 **P&L = (Sum of all winning trades) − (Sum of all losing trades) − Transaction costs**
         """)
 
+    # ── Today's Trend ─────────────────────────────────────────────────────────
+    st.subheader("Today's Trend")
+    today_str = date.today().isoformat()
+    _tf = PROJECT / "data/trades_log.jsonl"
+    _sf = PROJECT / "data/signals_log.jsonl"
+    _today_trades_raw: list[dict] = []
+    _today_sigs: list[dict] = []
+    try:
+        if _tf.exists():
+            _today_trades_raw = [json.loads(l) for l in _tf.read_text().splitlines()
+                                  if l.strip() and str(json.loads(l).get("time",""))[:10] == today_str]
+        if _sf.exists():
+            _today_sigs = [json.loads(l) for l in _sf.read_text().splitlines()
+                           if l.strip() and str(json.loads(l).get("time",""))[:10] == today_str]
+    except Exception:
+        pass
+
+    _today_exits = [r for r in _today_trades_raw if r.get("type") == "EXIT"]
+    _today_pnl   = sum(float(r.get("pnl", 0)) for r in _today_exits)
+    _longs  = sum(1 for s in _today_sigs if int(s.get("direction", 0)) == 1)
+    _shorts = sum(1 for s in _today_sigs if int(s.get("direction", 0)) == -1)
+    _total_sigs = _longs + _shorts
+    if _total_sigs > 0:
+        if _shorts > _longs * 1.5:
+            _bias = "🔴 BEARISH"
+        elif _longs > _shorts * 1.5:
+            _bias = "🟢 BULLISH"
+        else:
+            _bias = "⚪ MIXED"
+    else:
+        _bias = "⬜ No signals"
+
+    _acted = [s for s in _today_sigs if s.get("acted_on")]
+    _wins_t  = [r for r in _today_exits if float(r.get("pnl", 0)) > 0]
+    _losses_t = [r for r in _today_exits if float(r.get("pnl", 0)) < 0]
+    _wr_today = len(_wins_t) / len(_today_exits) * 100 if _today_exits else 0
+
+    tr1, tr2, tr3, tr4 = st.columns(4)
+    with tr1:
+        st.metric("Market Bias", _bias,
+                  f"↑{_longs} long · ↓{_shorts} short signals" if _total_sigs else "—")
+    with tr2:
+        st.metric("Today's P&L", f"₹{_today_pnl:+,.0f}",
+                  "profit" if _today_pnl > 0 else ("loss" if _today_pnl < 0 else "breakeven"))
+    with tr3:
+        st.metric("Signals Fired", f"{len(_acted)} / {len(_today_sigs)}",
+                  "acted on / total fired")
+    with tr4:
+        st.metric("Today's Win Rate", f"{_wr_today:.0f}%",
+                  f"{len(_wins_t)}W / {len(_losses_t)}L" if _today_exits else "no closed trades")
+
+    # Equity curve sparkline
+    _eq_pts: list[dict] = []
+    _running = 0.0
+    for _r in _today_exits:
+        _running += float(_r.get("pnl", 0))
+        _t = pd.to_datetime(_r["time"], format="ISO8601").strftime("%H:%M")
+        _eq_pts.append({"time": _t, "pnl": round(_running, 2)})
+
+    if _eq_pts:
+        _df_eq = pd.DataFrame(_eq_pts)
+        _color = "#00c896" if _today_pnl >= 0 else "#ff4c6a"
+        _fill  = "rgba(0,200,150,0.15)" if _today_pnl >= 0 else "rgba(255,76,106,0.15)"
+        _fig = go.Figure()
+        _fig.add_trace(go.Scatter(
+            x=_df_eq["time"], y=_df_eq["pnl"],
+            mode="lines+markers",
+            fill="tozeroy",
+            line=dict(color=_color, width=2),
+            fillcolor=_fill,
+            marker=dict(size=8, color=_color),
+            name="Today's P&L",
+            hovertemplate="<b>%{x}</b><br>P&L: ₹%{y:,.0f}<extra></extra>",
+        ))
+        _fig.add_hline(y=0, line_dash="dash", line_color="gray", opacity=0.4)
+        _fig.update_layout(
+            height=160, margin=dict(l=0, r=0, t=8, b=0),
+            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+            xaxis=dict(showgrid=False, title=""),
+            yaxis=dict(title="P&L (₹)", gridcolor="rgba(128,128,128,0.15)", zeroline=False),
+            showlegend=False,
+        )
+        st.plotly_chart(_fig, use_container_width=True)
+    else:
+        st.caption("Equity curve appears after first exit today.")
+
+    st.divider()
+
     # ── Recent signals ────────────────────────────────────────────────────────
     left, right = st.columns([1, 1])
 
@@ -433,11 +563,24 @@ def render():
                 lambda x: "✅ Filled" if x else "⏭ Skipped"
             )
             display["time"] = pd.to_datetime(display["time"], format="ISO8601").dt.strftime("%d %b %H:%M")
+
+            # Build Comments: strategy reason for fills, skip_reason for skips
+            def _make_comment(row):
+                skip = str(row.get("skip_reason", "") or "").strip()
+                reason = str(row.get("reason", "") or "").strip()
+                acted = row.get("acted_on", True)
+                if acted == "✅ Filled" or acted is True:
+                    return reason
+                return skip if skip else reason
+
+            display["comments"] = display.apply(_make_comment, axis=1)
+
             display = display.rename(columns={
                 "time": "Time", "symbol": "Symbol", "direction": "Direction",
-                "confidence": "Confidence", "regime": "Regime", "acted_on": "Result",
+                "confidence": "Confidence", "regime": "Regime",
+                "acted_on": "Result", "comments": "Comments",
             })
-            cols = [c for c in ["Time", "Symbol", "Direction", "Confidence", "Regime", "Result"] if c in display.columns]
+            cols = [c for c in ["Time", "Symbol", "Direction", "Confidence", "Regime", "Result", "Comments"] if c in display.columns]
             st.dataframe(display[cols], use_container_width=True, hide_index=True)
 
     with right:
@@ -560,15 +703,24 @@ def render():
                     ce_ltp     = opts.get("ce_ltp")
                     pe_ltp     = opts.get("pe_ltp")
 
-                    # Suggested options action based on direction
+                    # Options action uses the underlying price AT TRADE TIME
+                    # (not current live options premium — that changes after the trade)
+                    ref_px = float(r.get("price", 0))
                     if trade_type == "ENTRY":
-                        opt_action = ("📈 BUY CE @ ₹" + f"{ce_ltp:,.2f}" if direction == "LONG" and ce_ltp
-                                      else "📉 BUY PE @ ₹" + f"{pe_ltp:,.2f}" if direction == "SHORT" and pe_ltp
-                                      else "—")
-                    else:
-                        opt_action = ("📉 SELL PE @ ₹" + f"{pe_ltp:,.2f}" if direction == "SHORT" and pe_ltp
-                                      else "📈 SELL CE @ ₹" + f"{ce_ltp:,.2f}" if direction == "LONG" and ce_ltp
-                                      else "—")
+                        if direction == "LONG":
+                            opt_action = f"📈 BUY CE @ ₹{ref_px:,.2f}" if ref_px else "—"
+                        elif direction == "SHORT":
+                            opt_action = f"📉 BUY PE @ ₹{ref_px:,.2f}" if ref_px else "—"
+                        else:
+                            opt_action = "—"
+                    else:  # EXIT — infer direction from side: BUY=was SHORT, SELL=was LONG
+                        exit_side = r.get("side", "")
+                        if exit_side == "BUY":
+                            opt_action = f"📉 SELL PE @ ₹{ref_px:,.2f}" if ref_px else "—"
+                        elif exit_side == "SELL":
+                            opt_action = f"📈 SELL CE @ ₹{ref_px:,.2f}" if ref_px else "—"
+                        else:
+                            opt_action = "—"
 
                     if trade_type == "ENTRY":
                         entry_px  = float(r.get("price", 0))
@@ -579,6 +731,7 @@ def render():
                         journal.append({
                             "Time":           pd.to_datetime(r["time"], format="ISO8601").strftime("%d %b %H:%M"),
                             "Type":           "🟢 LONG" if direction == "LONG" else "🔴 SHORT",
+                            "Trend/Signal":   _parse_trend(r.get("reason", "")),
                             "Symbol":         symbol,
                             "Qty":            qty,
                             "Entry Price":    f"₹{entry_px:,.2f}",
@@ -597,11 +750,11 @@ def render():
                         })
                     elif trade_type == "EXIT":
                         result = "✅ Profit" if pnl > 0 else ("❌ Loss" if pnl < 0 else "➖ B/E")
-                        reason = r.get("reason", "").split()[0] if r.get("reason") else "—"
                         exit_px = float(r.get("price", 0))
                         journal.append({
                             "Time":           pd.to_datetime(r["time"], format="ISO8601").strftime("%d %b %H:%M"),
                             "Type":           "🏁 EXIT",
+                            "Trend/Signal":   _parse_trend(r.get("reason", "")),
                             "Symbol":         symbol,
                             "Qty":            r.get("qty"),
                             "Entry Price":    f"₹{float(r.get('entry_price',0)):,.2f}" if r.get('entry_price') else "—",
@@ -617,10 +770,19 @@ def render():
                             "Unrealized":     "—",
                             "Realised P&L":   f"₹{pnl:+,.0f}",
                             "Capital After":  f"₹{cap_after:,.0f}" if cap_after else "—",
-                            "Status":         f"✅ Closed · {result} · {reason}",
+                            "Status":         f"✅ Closed · {result}",
                         })
 
                 df_journal = pd.DataFrame(journal)
+
+                _jcols = [c for c in [
+                    "Time", "Type", "Trend/Signal", "Symbol", "Qty",
+                    "Entry Price", "Exit Price", "Live Price",
+                    "ATM Strike", "Options Action", "Expiry",
+                    "Stop", "Target", "Unrealized", "Realised P&L",
+                    "Capital After", "Status",
+                ] if c in df_journal.columns]
+                df_journal = df_journal[_jcols]
 
                 def _style_cell(val):
                     if not isinstance(val, str) or val in ("—", ""):
@@ -632,8 +794,8 @@ def render():
                     except Exception:
                         return ""
 
-                styled = df_journal.style.map(
-                    _style_cell, subset=["Realised P&L", "Unrealized"])
+                _style_subset = [c for c in ["Realised P&L", "Unrealized"] if c in df_journal.columns]
+                styled = df_journal.style.map(_style_cell, subset=_style_subset)
                 st.dataframe(styled, use_container_width=True, hide_index=True)
                 st.caption(
                     f"Prices at **{fetched_at}** IST · "
@@ -688,7 +850,14 @@ def render():
                     if sigs:
                         last_dir = int(sigs[-1].get("direction", 0))
 
-                suggested = "BUY CE 📈" if last_dir == 1 else ("BUY PE 📉" if last_dir == -1 else "—")
+                _ce_px = opts.get("ce_ltp")
+                _pe_px = opts.get("pe_ltp")
+                if last_dir == 1:
+                    suggested = f"📈 BUY CE @ ₹{_ce_px:,.2f}" if _ce_px else "📈 BUY CE"
+                elif last_dir == -1:
+                    suggested = f"📉 BUY PE @ ₹{_pe_px:,.2f}" if _pe_px else "📉 BUY PE"
+                else:
+                    suggested = "—"
 
                 opts_rows.append({
                     "Symbol":       short_sym,

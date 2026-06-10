@@ -27,6 +27,7 @@ if str(_pkg) not in sys.path:
 # Promote them to os.environ so existing dotenv-based code works unchanged.
 try:
     for _k in ("FYERS_APP_ID", "FYERS_SECRET", "FYERS_REDIRECT_URI",
+               "FYERS_ACCESS_TOKEN",
                "DATABASE_URL", "TELEGRAM_TOKEN", "TELEGRAM_CHAT_ID", "REDIS_URL"):
         if _k in st.secrets and _k not in os.environ:
             os.environ[_k] = st.secrets[_k]
@@ -98,14 +99,18 @@ with st.sidebar:
 
     import json
     from datetime import date
-    token_path = Path("fyers_token.txt")
     token_ok = False
-    if token_path.exists():
-        try:
-            data = json.loads(token_path.read_text())
-            token_ok = data.get("date") == date.today().isoformat()
-        except Exception:
-            pass
+    # Cloud: token supplied via FYERS_ACCESS_TOKEN secret
+    if os.environ.get("FYERS_ACCESS_TOKEN", "").strip():
+        token_ok = True
+    else:
+        token_path = Path("fyers_token.txt")
+        if token_path.exists():
+            try:
+                data = json.loads(token_path.read_text())
+                token_ok = data.get("date") == date.today().isoformat()
+            except Exception:
+                pass
 
     st.markdown("**System Status**")
     st.markdown(f"{'🟢' if db_ok else '🔴'} Database {'Connected' if db_ok else 'Disconnected'}")

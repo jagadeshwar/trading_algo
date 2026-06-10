@@ -129,8 +129,12 @@ class PaperTrader:
 
     # ── Main hooks ────────────────────────────────────────────────────────────
 
-    def on_signal(self, signal: Signal) -> Fill | None:
-        """Process an entry signal. Returns Fill if position opened."""
+    def on_signal(self, signal: Signal) -> tuple["Fill | None", str]:
+        """Process an entry signal. Returns (Fill, skip_reason).
+
+        skip_reason is empty string when a fill is produced, otherwise a
+        human-readable explanation of why the signal was not acted on.
+        """
         self.circuit.record_tick()
 
         state = self.circuit.check_all(
@@ -138,15 +142,17 @@ class PaperTrader:
             daily_dd_pct=self._daily_dd_pct(),
         )
         if state.broken:
-            logger.warning("Signal blocked — circuit broken: {}", state.reason)
-            return None
+            reason = f"Circuit breaker: {state.reason}"
+            logger.warning("Signal blocked — {}", reason)
+            return None, reason
 
         if signal.symbol in self._positions:
-            logger.debug("Already in position for {}, skipping signal", signal.symbol)
-            return None
+            reason = "Already in position for this symbol"
+            logger.debug(reason + " ({})", signal.symbol)
+            return None, reason
 
         if signal.direction == 0:
-            return None
+            return None, "Flat signal (direction=0)"
 
         qty = self.sizer.size(
             confidence=signal.confidence,
@@ -156,8 +162,14 @@ class PaperTrader:
             current_exposure=self._total_exposure(),
         )
         if qty == 0:
-            logger.debug("PositionSizer returned 0 shares for {}", signal.symbol)
-            return None
+            max_pos = self.equity * self.sizer.max_position_pct
+            reason = (
+                f"Position size = 0 — price ₹{signal.entry_price:,.0f} exceeds "
+                f"max position budget ₹{max_pos:,.0f} "
+                f"({self.sizer.max_position_pct*100:.0f}% of ₹{self.equity:,.0f} capital)"
+            )
+            logger.debug("PositionSizer returned 0 shares for {}: {}", signal.symbol, reason)
+            return None, reason
 
         costs = _compute_costs(qty, signal.entry_price,
                                "BUY" if signal.direction == 1 else "SELL",
@@ -197,7 +209,7 @@ class PaperTrader:
             signal.entry_price, signal.stop_price, signal.target_price,
             qty, signal.confidence,
         )
-        return fill
+        return fill, ""
 
     def update_positions(
         self,
