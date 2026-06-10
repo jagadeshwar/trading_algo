@@ -89,19 +89,32 @@ with st.sidebar:
     st.divider()
 
     # Quick system status in sidebar
-    try:
-        from dotenv import load_dotenv
-        load_dotenv()
-        from production.db.database import ping
-        db_ok = ping()
-    except Exception:
-        db_ok = False
-
     import json
-    from datetime import date
+    from datetime import date, datetime
+    from zoneinfo import ZoneInfo
+    IST = ZoneInfo("Asia/Kolkata")
+
+    # ── DB status: red only when DATABASE_URL is set but unreachable ──────────
+    db_url = os.environ.get("DATABASE_URL", "").strip()
+    if not db_url:
+        db_status = "⬜ Database not configured"
+    else:
+        try:
+            from dotenv import load_dotenv
+            load_dotenv()
+            from production.db.database import ping
+            db_ok = ping()
+            db_status = "🟢 Database Connected" if db_ok else "🔴 Database connection failed"
+        except Exception:
+            db_status = "🔴 Database connection failed"
+
+    # ── Fyers token: env var → session state → fyers_token.txt ───────────────
     token_ok = False
-    # Cloud: token supplied via FYERS_ACCESS_TOKEN secret
     if os.environ.get("FYERS_ACCESS_TOKEN", "").strip():
+        token_ok = True
+    elif st.session_state.get("_fyers_token", "").strip():
+        # Promote session-state token to env so auth.py picks it up
+        os.environ["FYERS_ACCESS_TOKEN"] = st.session_state["_fyers_token"]
         token_ok = True
     else:
         token_path = Path("fyers_token.txt")
@@ -112,17 +125,46 @@ with st.sidebar:
             except Exception:
                 pass
 
-    st.markdown("**System Status**")
-    st.markdown(f"{'🟢' if db_ok else '🔴'} Database {'Connected' if db_ok else 'Disconnected'}")
-    st.markdown(f"{'🟢' if token_ok else '🟡'} Fyers Token {'Valid' if token_ok else 'Expired/Missing'}")
-
-    from datetime import datetime
-    from zoneinfo import ZoneInfo
-    IST = ZoneInfo("Asia/Kolkata")
     now = datetime.now(IST)
-    market_open = now.time() >= __import__('datetime').time(9, 15) and now.time() <= __import__('datetime').time(15, 30) and now.weekday() < 5
+    import datetime as _dt
+    market_open = (now.time() >= _dt.time(9, 15)
+                   and now.time() <= _dt.time(15, 30)
+                   and now.weekday() < 5)
+
+    st.markdown("**System Status**")
+    st.markdown(db_status)
+    st.markdown(f"{'🟢' if token_ok else '🟡'} Fyers Token {'Valid' if token_ok else 'Not set'}")
     st.markdown(f"{'🟢' if market_open else '🔴'} Market {'Open' if market_open else 'Closed'}")
     st.caption(f"IST: {now.strftime('%H:%M:%S  %d %b %Y')}")
+
+    # ── Token paste widget (shown when token is missing) ──────────────────────
+    st.divider()
+    lbl = "🔑 Update Token" if token_ok else "🔑 Set Fyers Token"
+    with st.expander(lbl, expanded=not token_ok):
+        st.caption(
+            "Run `python nse_algo_trader/auth.py` locally, then paste "
+            "the printed token here. Valid until midnight IST."
+        )
+        pasted = st.text_input("Access token", type="password",
+                               key="_token_input_field",
+                               placeholder="eyJ0eXAiOiJKV1QiLC...")
+        if st.button("Activate token", type="primary"):
+            t = pasted.strip()
+            if t:
+                st.session_state["_fyers_token"] = t
+                os.environ["FYERS_ACCESS_TOKEN"] = t
+                # Also write to fyers_token.txt so the local cache is warm
+                try:
+                    Path("fyers_token.txt").write_text(
+                        json.dumps({"date": date.today().isoformat(),
+                                    "access_token": t})
+                    )
+                except Exception:
+                    pass
+                st.success("Token activated ✓")
+                st.rerun()
+            else:
+                st.error("Please paste a token first.")
 
 # ── Page routing ───────────────────────────────────────────────────────────────
 if page == "📊 Dashboard":
