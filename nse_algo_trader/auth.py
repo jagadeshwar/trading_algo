@@ -109,6 +109,9 @@ def auto_login() -> str:
             "FYERS_APP_ID, FYERS_SECRET in env / Streamlit secrets."
         )
 
+    import hashlib
+    from urllib.parse import quote as _quote
+
     s = _req.Session()
 
     # Step 1 — initiate login
@@ -131,13 +134,14 @@ def auto_login() -> str:
     r.raise_for_status()
     user_token = r.json()["data"]["access_token"]
 
-    # Step 4 — get auth_code (no callback server needed; read Location header)
-    session = fyersModel.SessionModel(
-        client_id=app_id, secret_key=secret,
-        redirect_uri=redirect_uri,
-        response_type="code", grant_type="authorization_code",
+    # Step 4 — get auth_code via redirect (pure requests, no fyers_apiv3 needed)
+    auth_url = (
+        "https://api-t2.fyers.in/api/v3/generate-authcode"
+        f"?client_id={_quote(app_id)}"
+        f"&redirect_uri={_quote(redirect_uri)}"
+        f"&response_type=code"
+        f"&state=autologin"
     )
-    auth_url = session.generate_authcode()
     r = s.get(auth_url, headers={"Authorization": f"Bearer {user_token}"},
               allow_redirects=False, timeout=15)
     loc = r.headers.get("Location", "")
@@ -145,9 +149,15 @@ def auto_login() -> str:
     if not auth_code:
         raise RuntimeError(f"auth_code not found in redirect: {loc!r}")
 
-    # Step 5 — exchange for final access token
-    session.set_token(auth_code)
-    resp = session.generate_token()
+    # Step 5 — exchange auth_code for access_token (pure HTTP, no fyers_apiv3)
+    app_id_hash = hashlib.sha256(f"{app_id}:{secret}".encode()).hexdigest()
+    r = s.post("https://api-t2.fyers.in/api/v3/validate-authcode",
+               json={"grant_type": "authorization_code",
+                     "appIdHash": app_id_hash,
+                     "code": auth_code},
+               timeout=15)
+    r.raise_for_status()
+    resp = r.json()
     if resp.get("s") != "ok":
         raise RuntimeError(f"Token generation failed: {resp}")
 
