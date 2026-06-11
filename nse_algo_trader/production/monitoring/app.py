@@ -96,34 +96,22 @@ with st.sidebar:
     IST = ZoneInfo("Asia/Kolkata")
 
     # ── DB status ─────────────────────────────────────────────────────────────
-    # Try every possible way to read DATABASE_URL
+    # Read DATABASE_URL: env var first, then every st.secrets access pattern
     db_url = os.environ.get("DATABASE_URL", "").strip()
-
     if not db_url:
-        try:                                    # st.secrets dict-style
-            db_url = str(st.secrets["DATABASE_URL"]).strip()
-        except Exception:
-            pass
-
-    if not db_url:
-        try:                                    # st.secrets attribute-style
-            db_url = str(st.secrets.DATABASE_URL).strip()
-        except Exception:
-            pass
-
+        for _accessor in [
+            lambda: str(st.secrets["DATABASE_URL"]),
+            lambda: str(st.secrets.DATABASE_URL),
+            lambda: str(st.secrets.get("DATABASE_URL", "")),
+        ]:
+            try:
+                db_url = _accessor().strip()
+                if db_url:
+                    break
+            except Exception:
+                pass
     if db_url:
-        os.environ["DATABASE_URL"] = db_url
-
-    # ── Debug expander (remove once DB is confirmed green) ────────────────────
-    with st.expander("🔧 Debug secrets", expanded=False):
-        try:
-            secret_keys = list(st.secrets.keys())
-            st.write("Keys in st.secrets:", secret_keys)
-        except Exception as _ex:
-            st.write("st.secrets error:", str(_ex))
-        st.write("DATABASE_URL in os.environ:", bool(os.environ.get("DATABASE_URL")))
-        if db_url:
-            st.write("db_url prefix:", db_url[:30] + "…")
+        os.environ["DATABASE_URL"] = db_url   # ensure engine sees it
 
     if not db_url:
         db_status = "⬜ Database not configured"

@@ -13,17 +13,19 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session, sessionmaker
 
 _engine = None
+_engine_url: str | None = None
 _SessionLocal = None
 
 
 def get_engine():
-    global _engine
-    if _engine is None:
-        url = os.environ.get(
-            "DATABASE_URL",
-            "postgresql://jthileti@localhost:5432/nse_algo",
-        )
+    """Return a SQLAlchemy engine, rebuilding if DATABASE_URL changed since last call."""
+    global _engine, _engine_url
+    url = os.environ.get("DATABASE_URL", "").strip()
+    if not url:
+        url = "postgresql://jthileti@localhost:5432/nse_algo"
+    if _engine is None or url != _engine_url:
         _engine = create_engine(url, pool_pre_ping=True, pool_size=5, max_overflow=10)
+        _engine_url = url
         logger.info("Database engine created: {}", url.split("@")[-1])
     return _engine
 
