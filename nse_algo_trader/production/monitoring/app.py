@@ -35,6 +35,38 @@ for _k in ("FYERS_APP_ID", "FYERS_SECRET", "FYERS_REDIRECT_URI",
     except Exception:
         pass  # key not in secrets or secrets not configured
 
+# ── Fyers OAuth callback handler ───────────────────────────────────────────────
+# When Fyers redirects back to this app with ?auth_code=XXX, exchange it for
+# an access token and store in Neon DB. Works from any browser/device.
+_qp = st.query_params
+if "auth_code" in _qp:
+    try:
+        import hashlib, requests as _req
+        _app_id = os.environ.get("FYERS_APP_ID", "")
+        _secret = os.environ.get("FYERS_SECRET", "")
+        _hash   = hashlib.sha256(f"{_app_id}:{_secret}".encode()).hexdigest()
+        _r = _req.post(
+            "https://api-t2.fyers.in/api/v3/validate-authcode",
+            json={"grant_type": "authorization_code",
+                  "appIdHash": _hash,
+                  "code": _qp["auth_code"]},
+            timeout=15,
+        )
+        _token = _r.json().get("access_token", "")
+        if _token:
+            os.environ["FYERS_ACCESS_TOKEN"] = _token
+            st.session_state["_fyers_token"] = _token
+            try:
+                sys.path.insert(0, str(_here.parents[2]))
+                from production.db.database import store_token
+                store_token("fyers", _token)
+            except Exception:
+                pass
+            st.query_params.clear()
+            st.success("✅ Fyers login successful — token saved.")
+    except Exception as _ex:
+        st.error(f"Token exchange failed: {_ex}")
+
 st.set_page_config(
     page_title="NSE Algo Trader",
     page_icon="📈",
@@ -173,29 +205,24 @@ with st.sidebar:
 
     # ── Token section ─────────────────────────────────────────────────────────
     st.divider()
-    if True:
-        # Manual paste fallback
-        lbl = "🔑 Update Token" if token_ok else "🔑 Set Fyers Token"
-        with st.expander(lbl, expanded=not token_ok):
-            st.caption("Paste token from `python auth.py` · valid until midnight IST.")
-            pasted = st.text_input("Access token", type="password",
-                                   key="_token_input_field",
-                                   placeholder="eyJ0eXAiOiJKV1QiLC...")
-            if st.button("Activate token", type="primary"):
-                t = pasted.strip()
-                if t:
-                    st.session_state["_fyers_token"] = t
-                    os.environ["FYERS_ACCESS_TOKEN"] = t
-                    try:
-                        Path("fyers_token.txt").write_text(
-                            json.dumps({"date": date.today().isoformat(),
-                                        "access_token": t}))
-                    except Exception:
-                        pass
-                    st.success("Token activated ✓")
-                    st.rerun()
-                else:
-                    st.error("Please paste a token first.")
+    # ── Fyers login button (works from any browser / phone) ───────────────────
+    _app_id      = os.environ.get("FYERS_APP_ID", "")
+    _redirect    = os.environ.get("FYERS_REDIRECT_URI", "")
+    if _app_id and _redirect:
+        from urllib.parse import quote as _q
+        _auth_url = (
+            "https://api-t2.fyers.in/api/v3/generate-authcode"
+            f"?client_id={_q(_app_id)}"
+            f"&redirect_uri={_q(_redirect)}"
+            f"&response_type=code"
+            f"&state=streamlit"
+        )
+        st.link_button("🔐 Login with Fyers", _auth_url,
+                       use_container_width=True, type="primary")
+        st.caption(
+            "Opens Fyers login. After completing, you'll be redirected "
+            "back here with the token saved automatically."
+        )
 
 # ── Page routing ───────────────────────────────────────────────────────────────
 if page == "📊 Dashboard":
