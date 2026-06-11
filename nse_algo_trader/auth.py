@@ -113,6 +113,16 @@ def auto_login() -> str:
     from urllib.parse import quote as _quote
 
     s = _req.Session()
+    s.headers.update({
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/126.0.0.0 Safari/537.36"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "gzip, deflate, br",
+    })
 
     # Step 1 — initiate login
     r = s.post("https://api-t2.fyers.in/vagator/v2/send_login_otp",
