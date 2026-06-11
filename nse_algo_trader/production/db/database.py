@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Generator
 
 import pandas as pd
@@ -219,13 +220,36 @@ def log_risk_event(event_type: str, detail: str, daily_pnl_pct: float | None = N
         conn.commit()
 
 
+# ── Schema auto-init ──────────────────────────────────────────────────────────
+
+def init_db() -> None:
+    """Create all tables if they don't exist (plain PostgreSQL, no TimescaleDB needed).
+
+    Safe to call multiple times — all statements are CREATE … IF NOT EXISTS.
+    Called automatically by ping() on first successful connection so Streamlit
+    Cloud deployments self-provision without a manual psql step.
+    """
+    schema = Path(__file__).parent / "schema_plain.sql"
+    sql = schema.read_text()
+    engine = get_engine()
+    with engine.connect() as conn:
+        conn.execute(text(sql))
+        conn.commit()
+    logger.info("init_db: schema applied (plain PostgreSQL)")
+
+
 # ── Health check ──────────────────────────────────────────────────────────────
 
 def ping() -> bool:
-    """Return True if the database is reachable."""
+    """Return True if the database is reachable; auto-creates tables on first connect."""
     try:
         with get_engine().connect() as conn:
             conn.execute(text("SELECT 1"))
+        # Tables may not exist yet on a brand-new cloud DB — create them silently
+        try:
+            init_db()
+        except Exception as e:
+            logger.debug("init_db skipped: {}", e)
         return True
     except Exception as e:
         logger.error("DB ping failed: {}", e)
