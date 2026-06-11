@@ -141,6 +141,14 @@ CREATE TABLE IF NOT EXISTS model_runs (
     notes               TEXT
 );
 
+CREATE TABLE IF NOT EXISTS tokens (
+    provider    TEXT  NOT NULL,
+    date        DATE  NOT NULL,
+    token       TEXT  NOT NULL,
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (provider, date)
+);
+
 CREATE TABLE IF NOT EXISTS risk_events (
     id                  BIGSERIAL        PRIMARY KEY,
     occurred_at         TIMESTAMPTZ      NOT NULL DEFAULT NOW(),

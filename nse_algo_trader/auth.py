@@ -191,7 +191,7 @@ def auto_login() -> str:
         raise RuntimeError(f"Token generation failed: {resp}")
 
     access_token = resp["access_token"]
-    TOKEN_FILE.write_text(json.dumps({"date": _today(), "access_token": access_token}))
+    _save_token(access_token)
     logger.success("Auto-login successful — token saved")
     return access_token
 
@@ -202,14 +202,25 @@ def _can_auto_login() -> bool:
                          "FYERS_APP_ID", "FYERS_SECRET"))
 
 
+def _save_token(token: str) -> None:
+    """Persist token to local file and Neon DB (best-effort)."""
+    TOKEN_FILE.write_text(json.dumps({"date": _today(), "access_token": token}))
+    try:
+        from production.db.database import store_token
+        store_token("fyers", token)
+    except Exception as e:
+        logger.debug("Could not store token in DB (non-critical): {}", e)
+
+
 def get_access_token() -> str:
-    """Return a valid token — auto-refreshes silently when credentials allow it.
+    """Return a valid token for today.
 
     Priority:
       1. FYERS_ACCESS_TOKEN env var (manual override / Streamlit secret)
       2. Cached fyers_token.txt dated today
-      3. Headless auto_login() if FYERS_CLIENT_ID/PIN/TOTP_SECRET are set
-      4. Interactive browser OAuth (local only)
+      3. Neon DB — token stored by local auth.py run
+      4. Headless auto_login() if credentials allow (local network only)
+      5. Interactive browser OAuth (local only)
     """
     # 1. Manual override
     env_token = os.environ.get("FYERS_ACCESS_TOKEN", "").strip()
@@ -217,7 +228,7 @@ def get_access_token() -> str:
         logger.info("Using FYERS_ACCESS_TOKEN from environment")
         return env_token
 
-    # 2. Cached token from today
+    # 2. Local file cache
     if TOKEN_FILE.exists():
         try:
             data = json.loads(TOKEN_FILE.read_text())
@@ -227,12 +238,23 @@ def get_access_token() -> str:
         except (json.JSONDecodeError, KeyError):
             pass
 
-    # 3. Headless auto-login (works on Streamlit Cloud)
+    # 3. Neon DB (token written by local auth.py; readable from Streamlit Cloud)
+    try:
+        from production.db.database import load_token
+        db_token = load_token("fyers")
+        if db_token:
+            logger.info("Using Fyers token from Neon DB")
+            os.environ["FYERS_ACCESS_TOKEN"] = db_token
+            return db_token
+    except Exception as e:
+        logger.debug("DB token lookup skipped: {}", e)
+
+    # 4. Headless auto-login (blocked by Cloudflare from cloud IPs)
     if _can_auto_login():
-        logger.info("Cached token missing/stale — attempting headless auto-login")
+        logger.info("Attempting headless auto-login")
         return auto_login()
 
-    # 4. Browser OAuth fallback (local only)
+    # 5. Browser OAuth (local only)
     return _refresh_token()
 
 
@@ -285,8 +307,8 @@ def _refresh_token() -> str:
         raise RuntimeError(f"Token generation failed: {response}")
 
     access_token = response["access_token"]
-    TOKEN_FILE.write_text(json.dumps({"date": _today(), "access_token": access_token}))
-    logger.success("Access token saved to {}", TOKEN_FILE)
+    _save_token(access_token)
+    logger.success("Access token saved to {} and Neon DB", TOKEN_FILE)
     return access_token
 
 

@@ -222,6 +222,39 @@ def log_risk_event(event_type: str, detail: str, daily_pnl_pct: float | None = N
         conn.commit()
 
 
+# ── Token store (Fyers daily token via Neon) ─────────────────────────────────
+
+def store_token(provider: str, token: str) -> None:
+    """Upsert today's access token for a given provider."""
+    from datetime import date
+    engine = get_engine()
+    with engine.connect() as conn:
+        conn.execute(text("""
+            INSERT INTO tokens (provider, date, token, updated_at)
+            VALUES (:provider, :date, :token, NOW())
+            ON CONFLICT (provider, date) DO UPDATE
+                SET token = EXCLUDED.token, updated_at = NOW()
+        """), {"provider": provider, "date": date.today().isoformat(), "token": token})
+        conn.commit()
+    logger.info("Token stored in DB for provider={} date={}", provider, date.today())
+
+
+def load_token(provider: str) -> str | None:
+    """Return today's token for provider, or None if not found."""
+    from datetime import date
+    try:
+        engine = get_engine()
+        with engine.connect() as conn:
+            row = conn.execute(text("""
+                SELECT token FROM tokens
+                WHERE provider = :provider AND date = :date
+            """), {"provider": provider, "date": date.today().isoformat()}).fetchone()
+        return row[0] if row else None
+    except Exception as e:
+        logger.debug("load_token failed: {}", e)
+        return None
+
+
 # ── Schema auto-init ──────────────────────────────────────────────────────────
 
 def init_db() -> None:

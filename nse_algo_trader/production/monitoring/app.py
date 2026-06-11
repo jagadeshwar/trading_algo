@@ -147,17 +147,17 @@ with st.sidebar:
             except Exception:
                 pass
 
-    # Auto-refresh on startup when credentials allow it
-    if not token_ok and auto_mode:
-        with st.spinner("Refreshing Fyers token…"):
-            try:
-                from auth import auto_login
-                new_token = auto_login()
-                os.environ["FYERS_ACCESS_TOKEN"] = new_token
-                st.session_state["_fyers_token"] = new_token
+    # Auto-load token from Neon DB if not already set
+    if not token_ok:
+        try:
+            from production.db.database import load_token
+            db_token = load_token("fyers")
+            if db_token:
+                os.environ["FYERS_ACCESS_TOKEN"] = db_token
+                st.session_state["_fyers_token"] = db_token
                 token_ok = True
-            except Exception as _e:
-                st.session_state["_auto_login_error"] = str(_e)
+        except Exception:
+            pass
 
     now = datetime.now(IST)
     import datetime as _dt
@@ -173,23 +173,7 @@ with st.sidebar:
 
     # ── Token section ─────────────────────────────────────────────────────────
     st.divider()
-    if auto_mode:
-        # Auto-login credentials are configured — just show a refresh button
-        if st.button("🔄 Refresh Fyers Token", use_container_width=True,
-                     help="Re-runs headless login (TOTP + PIN). Use if token expired mid-day."):
-            with st.spinner("Logging in…"):
-                try:
-                    from auth import auto_login
-                    new_token = auto_login()
-                    os.environ["FYERS_ACCESS_TOKEN"] = new_token
-                    st.session_state["_fyers_token"] = new_token
-                    st.success("Token refreshed ✓")
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Auto-login failed: {e}")
-        if st.session_state.get("_auto_login_error"):
-            st.error(f"Startup auto-login failed: {st.session_state['_auto_login_error']}")
-    else:
+    if True:
         # Manual paste fallback
         lbl = "🔑 Update Token" if token_ok else "🔑 Set Fyers Token"
         with st.expander(lbl, expanded=not token_ok):
