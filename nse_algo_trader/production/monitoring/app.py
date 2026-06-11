@@ -27,6 +27,7 @@ if str(_pkg) not in sys.path:
 # Promote them to os.environ so existing dotenv-based code works unchanged.
 for _k in ("FYERS_APP_ID", "FYERS_SECRET", "FYERS_REDIRECT_URI",
            "FYERS_ACCESS_TOKEN",
+           "FYERS_CLIENT_ID", "FYERS_PIN", "FYERS_TOTP_SECRET",
            "DATABASE_URL", "TELEGRAM_TOKEN", "TELEGRAM_CHAT_ID", "REDIS_URL"):
     try:
         if _k in st.secrets and _k not in os.environ:
@@ -116,12 +117,17 @@ with st.sidebar:
         except Exception:
             db_status = "🔴 Database connection failed"
 
-    # ── Fyers token: env var → session state → fyers_token.txt ───────────────
+    # ── Fyers token: env var → session state → file → auto-login ─────────────
+    import sys as _sys
+    _sys.path.insert(0, str(_pkg))
+    from auth import _can_auto_login, _today as _auth_today
+
     token_ok = False
+    auto_mode = _can_auto_login()
+
     if os.environ.get("FYERS_ACCESS_TOKEN", "").strip():
         token_ok = True
     elif st.session_state.get("_fyers_token", "").strip():
-        # Promote session-state token to env so auth.py picks it up
         os.environ["FYERS_ACCESS_TOKEN"] = st.session_state["_fyers_token"]
         token_ok = True
     else:
@@ -130,8 +136,22 @@ with st.sidebar:
             try:
                 data = json.loads(token_path.read_text())
                 token_ok = data.get("date") == date.today().isoformat()
+                if token_ok:
+                    os.environ["FYERS_ACCESS_TOKEN"] = data["access_token"]
             except Exception:
                 pass
+
+    # Auto-refresh on startup when credentials allow it
+    if not token_ok and auto_mode:
+        with st.spinner("Refreshing Fyers token…"):
+            try:
+                from auth import auto_login
+                new_token = auto_login()
+                os.environ["FYERS_ACCESS_TOKEN"] = new_token
+                st.session_state["_fyers_token"] = new_token
+                token_ok = True
+            except Exception as _e:
+                st.session_state["_auto_login_error"] = str(_e)
 
     now = datetime.now(IST)
     import datetime as _dt
@@ -145,34 +165,47 @@ with st.sidebar:
     st.markdown(f"{'🟢' if market_open else '🔴'} Market {'Open' if market_open else 'Closed'}")
     st.caption(f"IST: {now.strftime('%H:%M:%S  %d %b %Y')}")
 
-    # ── Token paste widget (shown when token is missing) ──────────────────────
+    # ── Token section ─────────────────────────────────────────────────────────
     st.divider()
-    lbl = "🔑 Update Token" if token_ok else "🔑 Set Fyers Token"
-    with st.expander(lbl, expanded=not token_ok):
-        st.caption(
-            "Run `python nse_algo_trader/auth.py` locally, then paste "
-            "the printed token here. Valid until midnight IST."
-        )
-        pasted = st.text_input("Access token", type="password",
-                               key="_token_input_field",
-                               placeholder="eyJ0eXAiOiJKV1QiLC...")
-        if st.button("Activate token", type="primary"):
-            t = pasted.strip()
-            if t:
-                st.session_state["_fyers_token"] = t
-                os.environ["FYERS_ACCESS_TOKEN"] = t
-                # Also write to fyers_token.txt so the local cache is warm
+    if auto_mode:
+        # Auto-login credentials are configured — just show a refresh button
+        if st.button("🔄 Refresh Fyers Token", use_container_width=True,
+                     help="Re-runs headless login (TOTP + PIN). Use if token expired mid-day."):
+            with st.spinner("Logging in…"):
                 try:
-                    Path("fyers_token.txt").write_text(
-                        json.dumps({"date": date.today().isoformat(),
-                                    "access_token": t})
-                    )
-                except Exception:
-                    pass
-                st.success("Token activated ✓")
-                st.rerun()
-            else:
-                st.error("Please paste a token first.")
+                    from auth import auto_login
+                    new_token = auto_login()
+                    os.environ["FYERS_ACCESS_TOKEN"] = new_token
+                    st.session_state["_fyers_token"] = new_token
+                    st.success("Token refreshed ✓")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Auto-login failed: {e}")
+        if st.session_state.get("_auto_login_error"):
+            st.error(f"Startup auto-login failed: {st.session_state['_auto_login_error']}")
+    else:
+        # Manual paste fallback
+        lbl = "🔑 Update Token" if token_ok else "🔑 Set Fyers Token"
+        with st.expander(lbl, expanded=not token_ok):
+            st.caption("Paste token from `python auth.py` · valid until midnight IST.")
+            pasted = st.text_input("Access token", type="password",
+                                   key="_token_input_field",
+                                   placeholder="eyJ0eXAiOiJKV1QiLC...")
+            if st.button("Activate token", type="primary"):
+                t = pasted.strip()
+                if t:
+                    st.session_state["_fyers_token"] = t
+                    os.environ["FYERS_ACCESS_TOKEN"] = t
+                    try:
+                        Path("fyers_token.txt").write_text(
+                            json.dumps({"date": date.today().isoformat(),
+                                        "access_token": t}))
+                    except Exception:
+                        pass
+                    st.success("Token activated ✓")
+                    st.rerun()
+                else:
+                    st.error("Please paste a token first.")
 
 # ── Page routing ───────────────────────────────────────────────────────────────
 if page == "📊 Dashboard":

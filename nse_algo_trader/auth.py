@@ -1,14 +1,15 @@
-"""Fyers daily token login with auto-capture callback server.
+"""Fyers daily token login — browser OAuth or fully automated headless flow.
 
-Flow:
-  1. Generates auth URL and opens it in the browser automatically.
-  2. Starts a local HTTP server on port 5000.
-  3. Fyers redirects back to http://127.0.0.1:5000/?auth_code=... after login.
-  4. Server captures the auth_code, exchanges it for an access token, saves it.
+Automated flow (no browser, works on Streamlit Cloud):
+  Set these env vars / Streamlit secrets:
+    FYERS_CLIENT_ID    — your Fyers login ID (e.g. XA12345)
+    FYERS_PIN          — your 4-6 digit Fyers login PIN
+    FYERS_TOTP_SECRET  — base32 TOTP secret from your 2FA setup
+  Then call get_access_token() — it refreshes silently every day.
 
-Usage:
-  python auth.py              # full interactive login
-  python auth.py --check      # just verify today's token is valid
+Browser OAuth flow (local only):
+  python auth.py              # opens browser, saves token
+  python auth.py --check      # verify today's token is valid
 """
 
 from __future__ import annotations
@@ -82,18 +83,102 @@ def _today() -> str:
     return date.today().isoformat()
 
 
-def get_access_token() -> str:
-    """Return today's cached token if valid, otherwise trigger a new browser login.
+def auto_login() -> str:
+    """Headless token refresh using Fyers' login API — no browser required.
 
-    On Streamlit Cloud (or any environment without a local browser), set the
-    FYERS_ACCESS_TOKEN environment variable / Streamlit secret to bypass OAuth.
+    Uses FYERS_CLIENT_ID + FYERS_PIN + FYERS_TOTP_SECRET to complete the
+    OAuth flow programmatically. Safe to call from Streamlit Cloud.
     """
-    # Cloud / CI: token injected via env var or Streamlit secrets
+    import requests as _req
+    try:
+        import pyotp
+    except ImportError:
+        raise RuntimeError("pyotp is required for auto-login: pip install pyotp")
+
+    client_id   = os.environ.get("FYERS_CLIENT_ID",   "").strip()
+    pin         = os.environ.get("FYERS_PIN",         "").strip()
+    totp_secret = os.environ.get("FYERS_TOTP_SECRET", "").strip()
+    app_id      = os.environ.get("FYERS_APP_ID",      "").strip()
+    secret      = os.environ.get("FYERS_SECRET",      "").strip()
+    redirect_uri = os.environ.get("FYERS_REDIRECT_URI",
+                                  f"http://127.0.0.1:{CALLBACK_PORT}")
+
+    if not all([client_id, pin, totp_secret, app_id, secret]):
+        raise RuntimeError(
+            "Auto-login needs FYERS_CLIENT_ID, FYERS_PIN, FYERS_TOTP_SECRET, "
+            "FYERS_APP_ID, FYERS_SECRET in env / Streamlit secrets."
+        )
+
+    s = _req.Session()
+
+    # Step 1 — initiate login
+    r = s.post("https://api-t2.fyers.in/vagator/v2/send_login_otp",
+               json={"fy_id": client_id, "app_id": "2"}, timeout=15)
+    r.raise_for_status()
+    rk = r.json()["request_key"]
+
+    # Step 2 — verify TOTP
+    r = s.post("https://api-t2.fyers.in/vagator/v2/verify_otp",
+               json={"request_key": rk, "otp": pyotp.TOTP(totp_secret).now()},
+               timeout=15)
+    r.raise_for_status()
+    rk = r.json()["request_key"]
+
+    # Step 3 — verify PIN
+    r = s.post("https://api-t2.fyers.in/vagator/v2/verify_pin",
+               json={"request_key": rk, "identity_type": "pin", "identifier": pin},
+               timeout=15)
+    r.raise_for_status()
+    user_token = r.json()["data"]["access_token"]
+
+    # Step 4 — get auth_code (no callback server needed; read Location header)
+    session = fyersModel.SessionModel(
+        client_id=app_id, secret_key=secret,
+        redirect_uri=redirect_uri,
+        response_type="code", grant_type="authorization_code",
+    )
+    auth_url = session.generate_authcode()
+    r = s.get(auth_url, headers={"Authorization": f"Bearer {user_token}"},
+              allow_redirects=False, timeout=15)
+    loc = r.headers.get("Location", "")
+    auth_code = parse_qs(urlparse(loc).query).get("auth_code", [None])[0]
+    if not auth_code:
+        raise RuntimeError(f"auth_code not found in redirect: {loc!r}")
+
+    # Step 5 — exchange for final access token
+    session.set_token(auth_code)
+    resp = session.generate_token()
+    if resp.get("s") != "ok":
+        raise RuntimeError(f"Token generation failed: {resp}")
+
+    access_token = resp["access_token"]
+    TOKEN_FILE.write_text(json.dumps({"date": _today(), "access_token": access_token}))
+    logger.success("Auto-login successful — token saved")
+    return access_token
+
+
+def _can_auto_login() -> bool:
+    return all(os.environ.get(k, "").strip()
+               for k in ("FYERS_CLIENT_ID", "FYERS_PIN", "FYERS_TOTP_SECRET",
+                         "FYERS_APP_ID", "FYERS_SECRET"))
+
+
+def get_access_token() -> str:
+    """Return a valid token — auto-refreshes silently when credentials allow it.
+
+    Priority:
+      1. FYERS_ACCESS_TOKEN env var (manual override / Streamlit secret)
+      2. Cached fyers_token.txt dated today
+      3. Headless auto_login() if FYERS_CLIENT_ID/PIN/TOTP_SECRET are set
+      4. Interactive browser OAuth (local only)
+    """
+    # 1. Manual override
     env_token = os.environ.get("FYERS_ACCESS_TOKEN", "").strip()
     if env_token:
         logger.info("Using FYERS_ACCESS_TOKEN from environment")
         return env_token
 
+    # 2. Cached token from today
     if TOKEN_FILE.exists():
         try:
             data = json.loads(TOKEN_FILE.read_text())
@@ -102,6 +187,13 @@ def get_access_token() -> str:
                 return data["access_token"]
         except (json.JSONDecodeError, KeyError):
             pass
+
+    # 3. Headless auto-login (works on Streamlit Cloud)
+    if _can_auto_login():
+        logger.info("Cached token missing/stale — attempting headless auto-login")
+        return auto_login()
+
+    # 4. Browser OAuth fallback (local only)
     return _refresh_token()
 
 
