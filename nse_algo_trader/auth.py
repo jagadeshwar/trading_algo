@@ -134,7 +134,7 @@ def auto_login() -> str:
     r.raise_for_status()
     user_token = r.json()["data"]["access_token"]
 
-    # Step 4 — get auth_code via redirect (pure requests, no fyers_apiv3 needed)
+    # Step 4 — get auth_code (Fyers returns it via redirect OR JSON body)
     auth_url = (
         "https://api-t2.fyers.in/api/v3/generate-authcode"
         f"?client_id={_quote(app_id)}"
@@ -144,10 +144,29 @@ def auto_login() -> str:
     )
     r = s.get(auth_url, headers={"Authorization": f"Bearer {user_token}"},
               allow_redirects=False, timeout=15)
+
+    auth_code = None
+
+    # Pattern A — 302 redirect: Location header contains auth_code
     loc = r.headers.get("Location", "")
-    auth_code = parse_qs(urlparse(loc).query).get("auth_code", [None])[0]
+    if loc:
+        auth_code = parse_qs(urlparse(loc).query).get("auth_code", [None])[0]
+
+    # Pattern B — 200 JSON body: {"auth_code": "..."} or {"code": "..."}
     if not auth_code:
-        raise RuntimeError(f"auth_code not found in redirect: {loc!r}")
+        try:
+            body = r.json()
+            auth_code = (body.get("auth_code")
+                         or body.get("code")
+                         or (body.get("data") or {}).get("auth_code"))
+        except Exception:
+            pass
+
+    if not auth_code:
+        raise RuntimeError(
+            f"auth_code not found. HTTP {r.status_code} | "
+            f"Location: {loc!r} | Body: {r.text[:400]!r}"
+        )
 
     # Step 5 — exchange auth_code for access_token (pure HTTP, no fyers_apiv3)
     app_id_hash = hashlib.sha256(f"{app_id}:{secret}".encode()).hexdigest()
