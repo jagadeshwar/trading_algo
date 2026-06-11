@@ -95,27 +95,45 @@ with st.sidebar:
     from zoneinfo import ZoneInfo
     IST = ZoneInfo("Asia/Kolkata")
 
-    # ── DB status: red only when DATABASE_URL is set but unreachable ──────────
+    # ── DB status ─────────────────────────────────────────────────────────────
+    # Try every possible way to read DATABASE_URL
     db_url = os.environ.get("DATABASE_URL", "").strip()
+
     if not db_url:
-        # Direct fallback — in case secrets→env promotion ran before st was ready
-        try:
-            db_url = str(st.secrets.get("DATABASE_URL", "")).strip()
-            if db_url:
-                os.environ["DATABASE_URL"] = db_url
+        try:                                    # st.secrets dict-style
+            db_url = str(st.secrets["DATABASE_URL"]).strip()
         except Exception:
             pass
+
+    if not db_url:
+        try:                                    # st.secrets attribute-style
+            db_url = str(st.secrets.DATABASE_URL).strip()
+        except Exception:
+            pass
+
+    if db_url:
+        os.environ["DATABASE_URL"] = db_url
+
+    # ── Debug expander (remove once DB is confirmed green) ────────────────────
+    with st.expander("🔧 Debug secrets", expanded=False):
+        try:
+            secret_keys = list(st.secrets.keys())
+            st.write("Keys in st.secrets:", secret_keys)
+        except Exception as _ex:
+            st.write("st.secrets error:", str(_ex))
+        st.write("DATABASE_URL in os.environ:", bool(os.environ.get("DATABASE_URL")))
+        if db_url:
+            st.write("db_url prefix:", db_url[:30] + "…")
+
     if not db_url:
         db_status = "⬜ Database not configured"
     else:
         try:
-            from dotenv import load_dotenv
-            load_dotenv()
             from production.db.database import ping
             db_ok = ping()
             db_status = "🟢 Database Connected" if db_ok else "🔴 Database connection failed"
-        except Exception:
-            db_status = "🔴 Database connection failed"
+        except Exception as _ex:
+            db_status = f"🔴 DB error: {_ex}"
 
     # ── Fyers token: env var → session state → file → auto-login ─────────────
     import sys as _sys
