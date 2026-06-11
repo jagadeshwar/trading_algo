@@ -25,14 +25,14 @@ if str(_pkg) not in sys.path:
 # ── Streamlit Cloud secrets → env vars ────────────────────────────────────────
 # When running on Streamlit Community Cloud, credentials live in st.secrets.
 # Promote them to os.environ so existing dotenv-based code works unchanged.
-try:
-    for _k in ("FYERS_APP_ID", "FYERS_SECRET", "FYERS_REDIRECT_URI",
-               "FYERS_ACCESS_TOKEN",
-               "DATABASE_URL", "TELEGRAM_TOKEN", "TELEGRAM_CHAT_ID", "REDIS_URL"):
+for _k in ("FYERS_APP_ID", "FYERS_SECRET", "FYERS_REDIRECT_URI",
+           "FYERS_ACCESS_TOKEN",
+           "DATABASE_URL", "TELEGRAM_TOKEN", "TELEGRAM_CHAT_ID", "REDIS_URL"):
+    try:
         if _k in st.secrets and _k not in os.environ:
-            os.environ[_k] = st.secrets[_k]
-except Exception:
-    pass  # not on Streamlit Cloud or no secrets configured yet
+            os.environ[_k] = str(st.secrets[_k])
+    except Exception:
+        pass  # key not in secrets or secrets not configured
 
 st.set_page_config(
     page_title="NSE Algo Trader",
@@ -96,6 +96,14 @@ with st.sidebar:
 
     # ── DB status: red only when DATABASE_URL is set but unreachable ──────────
     db_url = os.environ.get("DATABASE_URL", "").strip()
+    if not db_url:
+        # Direct fallback — in case secrets→env promotion ran before st was ready
+        try:
+            db_url = str(st.secrets.get("DATABASE_URL", "")).strip()
+            if db_url:
+                os.environ["DATABASE_URL"] = db_url
+        except Exception:
+            pass
     if not db_url:
         db_status = "⬜ Database not configured"
     else:
